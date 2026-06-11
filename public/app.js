@@ -8,6 +8,7 @@ const state = {
   repoPaths: {}, // key -> local path
   agentMode: "review",
   showResolved: false, // view toggle: include resolved inline threads in the diff
+  breakdowns: {}, // key -> { chunks, reviewed: number[] }
 };
 
 function keyOf(o, r, n) {
@@ -21,6 +22,7 @@ function persist() {
     repoPaths: state.repoPaths,
     agentMode: state.agentMode,
     showResolved: state.showResolved,
+    breakdowns: state.breakdowns,
   };
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(slim));
@@ -48,6 +50,7 @@ const agentModeEl = $("agentMode");
 const modeChipEl = $("modeChip");
 
 let modeInfo = null;
+let healthInfo = null;
 
 // ---------- Boot ----------
 init();
@@ -56,6 +59,7 @@ async function init() {
   // health
   try {
     const h = await fetch("/api/health").then((r) => r.json());
+    healthInfo = h;
     renderStatus(h);
     if (h.defaultRepoPath) repoPathEl.value = h.defaultRepoPath;
   } catch {
@@ -73,6 +77,7 @@ async function init() {
   const saved = loadPersisted();
   if (saved) {
     state.repoPaths = saved.repoPaths || {};
+    state.breakdowns = saved.breakdowns || {};
     state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
     agentModeEl.value = state.agentMode;
@@ -281,6 +286,11 @@ async function openPr(ref, opts = {}) {
     data: parsed,
     comments: null,
   };
+  const savedBd = state.breakdowns && state.breakdowns[key];
+  if (savedBd) {
+    tab.breakdown = savedBd.chunks;
+    tab.reviewedChunks = new Set(savedBd.reviewed || []);
+  }
   if (existing) {
     // The new tab.data may carry a different headSha; any cached file content
     // (fetched for markdown previews) was fetched against the old SHA and must
@@ -401,9 +411,135 @@ function renderReview() {
   // tab so it survives re-renders (e.g. after posting a comment). Default: the
   // PR description/overview, like GitHub's Conversation tab.
   if (!tab.selected) tab.selected = OVERVIEW;
+  if (!tab.sidebarView) tab.sidebarView = "files";
 
   renderSidebar(tab);
   renderMain(tab);
+}
+
+// Renders the "Chunks" sidebar view: an empty state with a "Break into chunks"
+// button if no breakdown exists yet, or the agent's ordered, collapsible
+// review chunks.
+function renderChunksView(tab) {
+  const hint = tab.breakdownError ? esc(tab.breakdownError) : "";
+  const loading = !!tab.breakdownLoading;
+
+  if (!Array.isArray(tab.breakdown) || tab.breakdown.length === 0) {
+    return `
+      <div class="chunks-empty">
+        <p class="chunks-empty-text">Let the agent organize this PR into an ordered, guided walkthrough of small review chunks.</p>
+        <button type="button" class="btn accent" id="runBreakdownBtn"${loading ? " disabled" : ""}>${loading ? "Analyzing…" : "Break into chunks"}</button>
+        <p class="chunks-hint${tab.breakdownError ? " error" : ""}" id="breakdownHint">${hint}</p>
+      </div>`;
+  }
+
+  if (!tab.collapsedChunks) tab.collapsedChunks = new Set();
+  if (!tab.reviewedChunks) tab.reviewedChunks = new Set();
+  const reviewedCount = tab.breakdown.filter((_, i) => tab.reviewedChunks.has(i)).length;
+
+  let html = `
+    <div class="chunks-head">
+      <span>${tab.breakdown.length} chunks</span>
+      <span class="chunks-progress">${reviewedCount} / ${tab.breakdown.length} reviewed</span>
+      <button type="button" class="btn ghost" id="rerunBreakdownBtn"${loading ? " disabled" : ""}>${loading ? "Re-running…" : "Re-run"}</button>
+    </div>
+    ${tab.breakdownError ? `<p class="chunks-hint error">${hint}</p>` : ""}`;
+
+  tab.breakdown.forEach((chunk, i) => {
+    const collapsed = tab.collapsedChunks.has(i);
+    const reviewed = tab.reviewedChunks.has(i);
+    const fileRows = chunk.files
+      .map(
+        (fn) => `
+      <div class="tree-row tree-file chunk-file${tab.selected === fn ? " active" : ""}" data-view="${esc(fn)}" title="${esc(fn)}">
+        <span class="tree-label">${esc(fn.split("/").pop())}</span>
+      </div>`
+      )
+      .join("");
+
+    html += `
+      <div class="chunk-section${collapsed ? " collapsed" : ""}${reviewed ? " reviewed" : ""}">
+        <div class="chunk-head" data-chunk="${i}">
+          <label class="chunk-reviewed-wrap" title="Mark this chunk reviewed">
+            <input type="checkbox" class="chunk-reviewed" data-reviewed="${i}" ${reviewed ? "checked" : ""} />
+          </label>
+          <span class="chunk-chevron">▶</span>
+          <span class="chunk-index">${i + 1}</span>
+          <span class="chunk-title">${esc(chunk.title)}</span>
+          <span class="chunk-count">${chunk.files.length}</span>
+        </div>
+        <div class="chunk-body">
+          <p class="chunk-narrative">${esc(chunk.narrative)}</p>
+          <div class="chunk-files">${fileRows}</div>
+        </div>
+      </div>`;
+  });
+
+  return html;
+}
+
+function saveBreakdown(tab) {
+  if (!tab.breakdown) {
+    delete state.breakdowns[tab.key];
+  } else {
+    state.breakdowns[tab.key] = {
+      chunks: tab.breakdown,
+      reviewed: [...(tab.reviewedChunks || [])],
+    };
+  }
+  persist();
+}
+
+// Calls the backend to break the PR into review chunks, managing loading and
+// error state on the tab and re-rendering the sidebar as it progresses.
+async function runBreakdownForTab(tab) {
+  if (tab.breakdownLoading) return;
+  const repoPath = repoPathEl.value.trim();
+  if (state.active) {
+    state.repoPaths[state.active] = repoPath;
+    persist();
+  }
+  // Pre-flight guards — set an error and bail without a network call.
+  if (healthInfo && !healthInfo.claudeAvailable) {
+    tab.breakdownError = "Claude Code isn't on PATH — the agent can't run. Install it or set CLAUDE_BIN.";
+    renderSidebar(tab);
+    return;
+  }
+  if (!repoPath) {
+    tab.breakdownError = "Set a local repo path (top of the page) so the agent has a checkout to read.";
+    renderSidebar(tab);
+    return;
+  }
+
+  tab.breakdownLoading = true;
+  tab.breakdownError = null;
+  renderSidebar(tab);
+
+  try {
+    const res = await fetch("/api/pr/breakdown", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        files: tab.data.files,
+        title: tab.data.title,
+        repoPath,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Request failed (${res.status})`);
+    }
+    const data = await res.json();
+    tab.breakdown = Array.isArray(data.chunks) ? data.chunks : [];
+    tab.collapsedChunks = new Set();
+    tab.reviewedChunks = new Set();
+    saveBreakdown(tab);
+  } catch (e) {
+    tab.breakdownError = e.message || "Breakdown failed.";
+  } finally {
+    tab.breakdownLoading = false;
+    renderSidebar(tab);
+  }
 }
 
 // Left panel: a "Description" entry at the top, then a nested folder tree of
@@ -415,18 +551,61 @@ function renderSidebar(tab) {
 
   const tree = buildFileTree(pr.files);
 
-  el.innerHTML = `
-    <div class="sidebar-item overview${tab.selected === OVERVIEW ? " active" : ""}" data-view="${OVERVIEW}">
-      <span class="sidebar-icon">📝</span>
-      <span class="sidebar-label">Description &amp; conversation</span>
-    </div>
+  const view = tab.sidebarView || "files";
+  const filesArea = `
     <div class="sidebar-files-head">
       ${pr.files.length} ${pr.files.length === 1 ? "file" : "files"} changed
       <span class="kbd-help" title="Keyboard shortcuts:&#10;j / k — move highlight down/up in the diff&#10;n / p — next/previous file&#10;Enter — comment on highlighted row">?</span>
     </div>
     ${renderReviewControls(tab)}
-    <div class="file-tree">${renderTreeNodes(tree, tab, "", 0)}</div>
+    <div class="file-tree">${renderTreeNodes(tree, tab, "", 0)}</div>`;
+
+  el.innerHTML = `
+    <div class="sidebar-item overview${tab.selected === OVERVIEW ? " active" : ""}" data-view="${OVERVIEW}">
+      <span class="sidebar-icon">📝</span>
+      <span class="sidebar-label">Description &amp; conversation</span>
+    </div>
+    <div class="sidebar-view-toggle">
+      <button type="button" class="view-toggle-btn${view === "files" ? " active" : ""}" data-sidebar-view="files">Files</button>
+      <button type="button" class="view-toggle-btn${view === "chunks" ? " active" : ""}" data-sidebar-view="chunks">Chunks</button>
+    </div>
+    ${view === "chunks" ? renderChunksView(tab) : filesArea}
   `;
+
+  el.querySelectorAll("[data-sidebar-view]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      tab.sidebarView = btn.dataset.sidebarView;
+      renderSidebar(tab);
+    });
+  });
+
+  el.querySelectorAll("[data-chunk]").forEach((head) => {
+    head.addEventListener("click", () => {
+      const i = Number(head.dataset.chunk);
+      if (!tab.collapsedChunks) tab.collapsedChunks = new Set();
+      if (tab.collapsedChunks.has(i)) tab.collapsedChunks.delete(i);
+      else tab.collapsedChunks.add(i);
+      renderSidebar(tab);
+    });
+  });
+
+  el.querySelectorAll("[data-reviewed]").forEach((box) => {
+    // Stop the click from bubbling to the chunk-head collapse handler.
+    box.addEventListener("click", (e) => e.stopPropagation());
+    box.addEventListener("change", () => {
+      const i = Number(box.dataset.reviewed);
+      if (!tab.reviewedChunks) tab.reviewedChunks = new Set();
+      if (box.checked) tab.reviewedChunks.add(i);
+      else tab.reviewedChunks.delete(i);
+      saveBreakdown(tab);
+      renderSidebar(tab);
+    });
+  });
+
+  const runBtn = $("runBreakdownBtn");
+  if (runBtn) runBtn.addEventListener("click", () => runBreakdownForTab(tab));
+  const rerunBtn = $("rerunBreakdownBtn");
+  if (rerunBtn) rerunBtn.addEventListener("click", () => runBreakdownForTab(tab));
 
   const resolvedToggle = $("showResolvedToggle");
   if (resolvedToggle) {

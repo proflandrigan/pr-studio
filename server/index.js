@@ -20,7 +20,8 @@ import {
   hasToken,
   tokenSource,
 } from "./github.js";
-import { runAgent, MODE_INFO, CLAUDE_BIN } from "./agent.js";
+import { runAgent, runBreakdown, MODE_INFO, CLAUDE_BIN } from "./agent.js";
+import { normalizeChunks } from "./breakdown.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -106,6 +107,23 @@ app.get(
       throw Object.assign(new Error("owner, repo, path, ref required"), { status: 400 });
     }
     res.json(await getFileContent({ owner, repo, path, ref }));
+  })
+);
+
+app.post(
+  "/api/pr/breakdown",
+  wrap(async (req, res) => {
+    const { files, title, repoPath } = req.body || {};
+    if (!Array.isArray(files) || files.length === 0) {
+      throw Object.assign(new Error("No changed files provided."), { status: 400 });
+    }
+    const raw = await runBreakdown({
+      files,
+      title: title || "",
+      repoPath: repoPath || process.env.DEFAULT_REPO_PATH,
+    });
+    const chunks = normalizeChunks(raw, files);
+    res.json({ chunks });
   })
 );
 
