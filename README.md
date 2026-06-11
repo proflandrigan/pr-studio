@@ -68,6 +68,10 @@ It opens in its own window, no browser chrome.
 - This holds your GitHub token in a local `.env` and only talks to
   api.github.com and your local `claude`. Don't expose the port publicly.
 
+## License
+
+[MIT](LICENSE) © proflandrigan
+
 ## Layout
 
 ```
