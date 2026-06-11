@@ -228,6 +228,10 @@ function showEmpty() {
 }
 
 // ---------- Render review ----------
+// Sentinel for the sidebar entry that shows the PR description + conversation
+// instead of a file diff.
+const OVERVIEW = "__overview__";
+
 function renderReview() {
   const tab = state.tabs.find((t) => t.key === state.active);
   if (!tab) return showEmpty();
@@ -248,9 +252,52 @@ function renderReview() {
         <span class="diffstat"><span class="plus">+${pr.additions ?? 0}</span> <span class="minus">−${pr.deletions ?? 0}</span> · ${pr.changedFiles ?? pr.files.length} files</span>
       </div>
     </div>
+    <div class="review-body">
+      <aside class="file-sidebar" id="fileSidebar"></aside>
+      <div class="file-main" id="fileMain"></div>
+    </div>
+  `;
+
+  // Which sidebar entry is selected is transient UI state kept on the in-memory
+  // tab so it survives re-renders (e.g. after posting a comment). Default: the
+  // PR description/overview, like GitHub's Conversation tab.
+  if (!tab.selected) tab.selected = OVERVIEW;
+
+  renderSidebar(tab);
+  renderMain(tab);
+}
+
+// Left panel: a "Description" entry at the top, then the changed-file list.
+// Selecting an entry swaps what the main pane shows.
+function renderSidebar(tab) {
+  const pr = tab.data;
+  const el = $("fileSidebar");
+
+  const fileItems = pr.files
+    .map((file) => {
+      const byLine = inlineCommentsByLine(tab, file.filename);
+      const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
+      const active = tab.selected === file.filename ? " active" : "";
+      return `
+        <div class="sidebar-item file-item${active}" data-view="${esc(file.filename)}" title="${esc(file.filename)}">
+          <span class="file-item-name">${esc(file.filename)}</span>
+          <span class="file-item-meta">
+            <span class="file-status">${file.status}</span>
+            ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
+            <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
+          </span>
+        </div>`;
+    })
+    .join("");
+
+  el.innerHTML = `
+    <div class="sidebar-item overview${tab.selected === OVERVIEW ? " active" : ""}" data-view="${OVERVIEW}">
+      <span class="sidebar-icon">📝</span>
+      <span class="sidebar-label">Description &amp; conversation</span>
+    </div>
+    <div class="sidebar-files-head">${pr.files.length} ${pr.files.length === 1 ? "file" : "files"} changed</div>
     ${renderReviewControls(tab)}
-    <div id="files"></div>
-    <div class="convo" id="convo"></div>
+    <div class="file-list">${fileItems}</div>
   `;
 
   const resolvedToggle = $("showResolvedToggle");
@@ -262,63 +309,95 @@ function renderReview() {
     });
   }
 
-  // Which files are expanded is transient UI state kept on the in-memory tab so
-  // it survives re-renders (e.g. after posting a comment). Default: first file.
-  if (!tab.openFiles) {
-    tab.openFiles = new Set(pr.files.length ? [pr.files[0].filename] : []);
-  }
+  el.querySelectorAll(".sidebar-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      tab.selected = item.dataset.view;
+      renderSidebar(tab);
+      renderMain(tab);
+    });
+  });
+}
 
-  const filesEl = $("files");
-  pr.files.forEach((file, idx) => filesEl.appendChild(renderFile(file, idx, tab)));
+// Right pane: either the PR description + conversation, or a single file diff.
+function renderMain(tab) {
+  const el = $("fileMain");
+  if (tab.selected === OVERVIEW) {
+    renderOverview(tab, el);
+    return;
+  }
+  const file = tab.data.files.find((f) => f.filename === tab.selected);
+  if (!file) {
+    // Selection no longer resolves (shouldn't happen) — fall back to overview.
+    tab.selected = OVERVIEW;
+    renderSidebar(tab);
+    return renderMain(tab);
+  }
+  el.innerHTML = "";
+  el.appendChild(renderFileDiff(file, tab));
+}
+
+function renderOverview(tab, el) {
+  const pr = tab.data;
+  const body =
+    pr.body && pr.body.trim()
+      ? `<div class="description-body">${esc(pr.body)}</div>`
+      : `<div class="description-body empty">No description provided.</div>`;
+  el.innerHTML = `
+    <div class="pr-description">
+      <h2>Description</h2>
+      ${body}
+    </div>
+    <div class="convo" id="convo"></div>
+  `;
   renderConversation(tab);
 }
 
-function renderFile(file, idx, tab) {
+function renderFileDiff(file, tab) {
   const el = document.createElement("div");
-  el.className = "file" + (tab.openFiles.has(file.filename) ? " open" : "");
-  const head = document.createElement("div");
-  head.className = "file-head";
+  el.className = "file open";
 
-  // Inline review comments for this file, grouped by the line they target.
   const byLine = inlineCommentsByLine(tab, file.filename);
   const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
 
+  const head = document.createElement("div");
+  head.className = "file-head static";
   head.innerHTML = `
-    <span class="file-chevron">▶</span>
     <span class="file-name">${esc(file.filename)}</span>
     <span class="file-status">${file.status}</span>
     ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
     <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
   `;
-  head.addEventListener("click", () => {
-    const open = el.classList.toggle("open");
-    if (open) tab.openFiles.add(file.filename);
-    else tab.openFiles.delete(file.filename);
-  });
   el.appendChild(head);
+  el.appendChild(buildDiffElement(file, tab));
+  return el;
+}
 
+// Builds the rendered diff (rows + any inline comment threads) for one file.
+function buildDiffElement(file, tab) {
   const diff = document.createElement("div");
   diff.className = "diff";
   if (!file.patch) {
     diff.innerHTML = `<div class="binary-note">No text diff available (binary file or too large to display).</div>`;
-  } else {
-    const placed = new Set();
-    for (const row of parsePatch(file.patch)) {
-      diff.appendChild(renderDiffRow(row, file, tab));
-      if (row.newLine && byLine.has(row.newLine)) {
-        byLine.get(row.newLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
-        placed.add(row.newLine);
-      }
-    }
-    // Comments whose target line isn't in the visible patch (outdated or out of
-    // the shown hunks) still need a home — show them at the end of the file.
-    const orphaned = [...byLine.entries()].filter(([line]) => !placed.has(line));
-    for (const [, arr] of orphaned) {
-      arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true })));
+    return diff;
+  }
+
+  // Inline review comments for this file, grouped by the line they target.
+  const byLine = inlineCommentsByLine(tab, file.filename);
+  const placed = new Set();
+  for (const row of parsePatch(file.patch)) {
+    diff.appendChild(renderDiffRow(row, file, tab));
+    if (row.newLine && byLine.has(row.newLine)) {
+      byLine.get(row.newLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
+      placed.add(row.newLine);
     }
   }
-  el.appendChild(diff);
-  return el;
+  // Comments whose target line isn't in the visible patch (outdated or out of
+  // the shown hunks) still need a home — show them at the end of the file.
+  const orphaned = [...byLine.entries()].filter(([line]) => !placed.has(line));
+  for (const [, arr] of orphaned) {
+    arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true })));
+  }
+  return diff;
 }
 
 // A small toolbar above the diff summarising resolved/outdated inline threads

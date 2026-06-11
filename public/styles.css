@@ -298,13 +298,108 @@ body {
 
 /* ---------- Review ---------- */
 .review {
-  padding: 20px 22px 40px;
-  max-width: 1100px;
-  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
 }
 
 .pr-head {
-  margin-bottom: 20px;
+  flex: none;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* Two-pane body: file list on the left, selected file/description on the right.
+   Each pane scrolls independently so the file list stays put while reading. */
+.review-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.file-sidebar {
+  width: 300px;
+  flex: none;
+  overflow-y: auto;
+  padding: 10px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+
+.file-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 18px 22px 40px;
+}
+
+/* ---------- Sidebar entries ---------- */
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.sidebar-item:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.sidebar-item.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.sidebar-item.overview .sidebar-icon {
+  font-size: 13px;
+}
+.sidebar-item.overview .sidebar-label {
+  font-family: var(--sans);
+  font-weight: 600;
+}
+
+.sidebar-files-head {
+  margin: 14px 8px 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted-dim);
+}
+
+.file-item {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+.file-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.file-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.file-item-meta .file-counts {
+  margin-left: auto;
 }
 
 .pr-title {
@@ -387,6 +482,12 @@ body {
   font-family: var(--mono);
   font-size: 12.5px;
   border-bottom: 1px solid transparent;
+}
+
+/* In the main pane a single file is always expanded — its header is just a
+   label, not a toggle. */
+.file-head.static {
+  cursor: default;
 }
 
 .file.open .file-head {
@@ -610,10 +711,8 @@ body {
   margin-left: 8px;
 }
 
-/* ---------- Conversation / general comment ---------- */
-.convo {
-  margin-top: 26px;
-}
+/* ---------- PR description ---------- */
+.pr-description h2,
 .convo h2 {
   font-size: 12px;
   text-transform: uppercase;
@@ -621,6 +720,26 @@ body {
   color: var(--muted);
   margin: 0 0 12px;
   font-weight: 600;
+}
+
+.description-body {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: var(--panel);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.description-body.empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ---------- Conversation / general comment ---------- */
+.convo {
+  margin-top: 26px;
 }
 .comment {
   border: 1px solid var(--line);
