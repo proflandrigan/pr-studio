@@ -52,6 +52,11 @@ const modeChipEl = $("modeChip");
 let modeInfo = null;
 let healthInfo = null;
 
+// Set by loadComments() when the selected file renders asynchronously (markdown/
+// notebook preview), so the preview function can re-apply the saved #fileMain
+// scroll position once its real content lands. See loadComments() for details.
+let pendingMainScroll = null;
+
 // ---------- Boot ----------
 init();
 
@@ -327,6 +332,25 @@ async function loadComments(key) {
       const newMain = $("fileMain");
       if (newSidebar) newSidebar.scrollTop = sidebarScroll;
       if (newMain) newMain.scrollTop = mainScroll;
+      // The markdown/notebook preview paths render asynchronously: they first
+      // show a short "Loading preview…" placeholder, then await the file
+      // content before appending the real (tall) element. The synchronous
+      // restore above runs against the placeholder and gets clamped to ~0, so
+      // stash the desired scroll position for the preview function to
+      // re-apply once its real content is in place. Only do this when the
+      // selected file will actually take that async preview path, so the
+      // value never leaks into a later unrelated render.
+      const selectedFile =
+        tab.selected !== OVERVIEW
+          ? tab.data?.files?.find((f) => f.filename === tab.selected)
+          : null;
+      if (
+        selectedFile &&
+        getFileViewMode(tab, selectedFile) === "preview" &&
+        (isMarkdownFile(selectedFile.filename) || isNotebookFile(selectedFile.filename))
+      ) {
+        pendingMainScroll = mainScroll;
+      }
     }
   } catch {
     /* comments are best-effort */
@@ -1066,6 +1090,14 @@ async function renderPreview(file, tab, container) {
 
   container.innerHTML = "";
   container.appendChild(buildPreviewElement(file, tab, content));
+
+  // Re-apply the #fileMain scroll position stashed by loadComments(), now that
+  // the real (tall) content has replaced the "Loading preview…" placeholder.
+  if (pendingMainScroll != null) {
+    const main = $("fileMain");
+    if (main) main.scrollTop = pendingMainScroll;
+    pendingMainScroll = null;
+  }
 }
 
 // ---------- Notebook preview ----------
@@ -1305,6 +1337,14 @@ async function renderNotebookPreview(file, tab, container) {
 
   container.innerHTML = "";
   container.appendChild(buildNotebookElement(file, tab, content));
+
+  // Re-apply the #fileMain scroll position stashed by loadComments(), now that
+  // the real (tall) content has replaced the "Loading preview…" placeholder.
+  if (pendingMainScroll != null) {
+    const main = $("fileMain");
+    if (main) main.scrollTop = pendingMainScroll;
+    pendingMainScroll = null;
+  }
 }
 
 // Builds the rendered diff (rows + any inline comment threads) for one file.
