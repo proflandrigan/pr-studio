@@ -1179,20 +1179,23 @@ function buildNotebookElement(file, tab, content) {
       cellEl.appendChild(pre);
     }
 
+    let target = null;
     if (cellSpans) {
       const span = cellSpans[i];
-      let target = null;
       for (let ln = span.startLine; ln <= span.endLine; ln++) {
         if (commentableRight.has(ln)) { target = ln; break; }
       }
-      if (target != null) {
-        cellEl.classList.add("commentable");
-        cellEl.addEventListener("click", (e) => {
-          if (e.target.closest("a")) return;
-          openInlineComposer(cellEl, file, { side: "RIGHT", line: target }, tab);
-        });
-      }
     }
+
+    cellEl.classList.add("commentable");
+    cellEl.addEventListener("click", (e) => {
+      if (e.target.closest("a")) return;
+      if (target != null) {
+        openInlineComposer(cellEl, file, { side: "RIGHT", line: target }, tab);
+      } else {
+        openNotebookCellComposer(cellEl, file, tab, i + 1, cell.cell_type || "raw");
+      }
+    });
 
     root.appendChild(cellEl);
 
@@ -1402,6 +1405,38 @@ function openInlineComposer(rowEl, file, target, tab) {
     if (e.key === "Escape") box.remove();
   });
   rowEl.insertAdjacentElement("afterend", box);
+  ta.focus();
+}
+
+// Opens a composer for a notebook cell that has no overlapping diff line
+// (or whose notebook has no patch at all). Posts a top-level conversation
+// comment prefixed with a reference to the cell, since GitHub inline review
+// comments can only target lines that are part of the diff.
+function openNotebookCellComposer(cellEl, file, tab, cellIndex, cellType) {
+  // one composer at a time
+  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  const box = document.createElement("div");
+  box.className = "inline-composer";
+  box.innerHTML = `
+    <textarea placeholder="Comment on ${esc(file.filename)} — cell ${cellIndex} (${esc(cellType)}) — Cmd/Ctrl+Enter to post"></textarea>
+    <button class="btn accent" type="button">Post</button>
+    <button class="btn ghost" type="button">Cancel</button>
+  `;
+  const ta = box.querySelector("textarea");
+  const [postBtn, cancelBtn] = box.querySelectorAll("button");
+  const prefix = `**\`${file.filename}\` — cell ${cellIndex} (${cellType}):**\n\n`;
+  const post = () => {
+    const text = (ta.value || "").trim();
+    if (!text) return;
+    postComment(tab, prefix + text, null, box);
+  };
+  postBtn.addEventListener("click", post);
+  cancelBtn.addEventListener("click", () => box.remove());
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") post();
+    if (e.key === "Escape") box.remove();
+  });
+  cellEl.insertAdjacentElement("afterend", box);
   ta.focus();
 }
 
