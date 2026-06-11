@@ -314,7 +314,20 @@ async function loadComments(key) {
       `/api/pr/comments?owner=${tab.owner}&repo=${tab.repo}&number=${tab.number}`
     ).then((r) => r.json());
     tab.comments = c;
-    if (state.active === key) renderReview();
+    if (state.active === key) {
+      // renderReview() rebuilds #fileSidebar and #fileMain from scratch, which
+      // resets their scroll position to 0. Capture and restore scrollTop so
+      // posting a comment doesn't snap the view back to the top.
+      const oldSidebar = $("fileSidebar");
+      const oldMain = $("fileMain");
+      const sidebarScroll = oldSidebar ? oldSidebar.scrollTop : 0;
+      const mainScroll = oldMain ? oldMain.scrollTop : 0;
+      renderReview();
+      const newSidebar = $("fileSidebar");
+      const newMain = $("fileMain");
+      if (newSidebar) newSidebar.scrollTop = sidebarScroll;
+      if (newMain) newMain.scrollTop = mainScroll;
+    }
   } catch {
     /* comments are best-effort */
   }
