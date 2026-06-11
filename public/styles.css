@@ -298,13 +298,144 @@ body {
 
 /* ---------- Review ---------- */
 .review {
-  padding: 20px 22px 40px;
-  max-width: 1100px;
-  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
 }
 
 .pr-head {
-  margin-bottom: 20px;
+  flex: none;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* Two-pane body: file list on the left, selected file/description on the right.
+   Each pane scrolls independently so the file list stays put while reading. */
+.review-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.file-sidebar {
+  width: 300px;
+  flex: none;
+  overflow-y: auto;
+  padding: 10px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+
+.file-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 18px 22px 40px;
+}
+
+/* ---------- Sidebar entries ---------- */
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.sidebar-item:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.sidebar-item.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.sidebar-item.overview .sidebar-icon {
+  font-size: 13px;
+}
+.sidebar-item.overview .sidebar-label {
+  font-family: var(--sans);
+  font-weight: 600;
+}
+
+.sidebar-files-head {
+  margin: 14px 8px 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted-dim);
+}
+
+/* ---------- File tree ---------- */
+.file-tree {
+  margin-top: 2px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* indent grows with nesting depth */
+  padding: 6px 8px 6px calc(10px + var(--depth, 0) * 13px);
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.tree-row:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.tree-file.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.tree-chevron {
+  flex: none;
+  width: 10px;
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 0.12s;
+}
+.tree-dir:not(.collapsed) .tree-chevron {
+  transform: rotate(90deg);
+}
+
+.tree-dir .tree-label {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.tree-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  font-size: 11px;
 }
 
 .pr-title {
@@ -387,6 +518,12 @@ body {
   font-family: var(--mono);
   font-size: 12.5px;
   border-bottom: 1px solid transparent;
+}
+
+/* In the main pane a single file is always expanded — its header is just a
+   label, not a toggle. */
+.file-head.static {
+  cursor: default;
 }
 
 .file.open .file-head {
@@ -519,10 +656,99 @@ body {
   border-color: var(--accent);
 }
 
-/* ---------- Conversation / general comment ---------- */
-.convo {
-  margin-top: 26px;
+/* posted inline review comment, shown beneath its diff line */
+.inline-comment {
+  background: var(--panel);
+  border-left: 3px solid var(--accent);
+  border-bottom: 1px solid var(--line-soft);
+  padding: 10px 14px;
+  white-space: normal;
 }
+.inline-comment .comment-head {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  margin-bottom: 5px;
+}
+.inline-comment .comment-head small {
+  color: var(--muted);
+  margin-left: 8px;
+}
+.inline-comment .comment-body {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.inline-comment.orphaned {
+  border-left-color: var(--muted-dim);
+  opacity: 0.85;
+}
+/* resolved threads are de-emphasised; outdated ones are muted but legible */
+.inline-comment.resolved {
+  border-left-color: var(--add);
+  opacity: 0.7;
+}
+.inline-comment.outdated {
+  border-left-color: var(--muted-dim);
+}
+
+.cm-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid currentColor;
+  vertical-align: middle;
+}
+.cm-badge.resolved {
+  color: var(--add);
+}
+.cm-badge.outdated {
+  color: var(--muted-dim);
+}
+
+/* toolbar above the diff: resolved toggle + outdated count */
+.review-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+.review-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.review-toggle input {
+  cursor: pointer;
+}
+.review-stat {
+  color: var(--muted-dim);
+}
+
+.file-comment-count {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 8px;
+}
+
+/* ---------- PR description ---------- */
+.pr-description h2,
 .convo h2 {
   font-size: 12px;
   text-transform: uppercase;
@@ -530,6 +756,26 @@ body {
   color: var(--muted);
   margin: 0 0 12px;
   font-weight: 600;
+}
+
+.description-body {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: var(--panel);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.description-body.empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ---------- Conversation / general comment ---------- */
+.convo {
+  margin-top: 26px;
 }
 .comment {
   border: 1px solid var(--line);

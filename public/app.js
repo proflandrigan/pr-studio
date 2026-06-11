@@ -7,6 +7,7 @@ const state = {
   active: null,
   repoPaths: {}, // key -> local path
   agentMode: "review",
+  showResolved: false, // view toggle: include resolved inline threads in the diff
 };
 
 function keyOf(o, r, n) {
@@ -19,6 +20,7 @@ function persist() {
     active: state.active,
     repoPaths: state.repoPaths,
     agentMode: state.agentMode,
+    showResolved: state.showResolved,
   };
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(slim));
@@ -64,6 +66,7 @@ async function init() {
   if (saved) {
     state.repoPaths = saved.repoPaths || {};
     state.agentMode = saved.agentMode || "review";
+    state.showResolved = Boolean(saved.showResolved);
     agentModeEl.value = state.agentMode;
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
@@ -225,6 +228,10 @@ function showEmpty() {
 }
 
 // ---------- Render review ----------
+// Sentinel for the sidebar entry that shows the PR description + conversation
+// instead of a file diff.
+const OVERVIEW = "__overview__";
+
 function renderReview() {
   const tab = state.tabs.find((t) => t.key === state.active);
   if (!tab) return showEmpty();
@@ -245,39 +252,274 @@ function renderReview() {
         <span class="diffstat"><span class="plus">+${pr.additions ?? 0}</span> <span class="minus">−${pr.deletions ?? 0}</span> · ${pr.changedFiles ?? pr.files.length} files</span>
       </div>
     </div>
-    <div id="files"></div>
-    <div class="convo" id="convo"></div>
+    <div class="review-body">
+      <aside class="file-sidebar" id="fileSidebar"></aside>
+      <div class="file-main" id="fileMain"></div>
+    </div>
   `;
 
-  const filesEl = $("files");
-  pr.files.forEach((file, idx) => filesEl.appendChild(renderFile(file, idx, tab)));
+  // Which sidebar entry is selected is transient UI state kept on the in-memory
+  // tab so it survives re-renders (e.g. after posting a comment). Default: the
+  // PR description/overview, like GitHub's Conversation tab.
+  if (!tab.selected) tab.selected = OVERVIEW;
+
+  renderSidebar(tab);
+  renderMain(tab);
+}
+
+// Left panel: a "Description" entry at the top, then a nested folder tree of
+// the changed files. Selecting an entry swaps what the main pane shows.
+function renderSidebar(tab) {
+  const pr = tab.data;
+  const el = $("fileSidebar");
+  if (!tab.collapsedDirs) tab.collapsedDirs = new Set();
+
+  const tree = buildFileTree(pr.files);
+
+  el.innerHTML = `
+    <div class="sidebar-item overview${tab.selected === OVERVIEW ? " active" : ""}" data-view="${OVERVIEW}">
+      <span class="sidebar-icon">📝</span>
+      <span class="sidebar-label">Description &amp; conversation</span>
+    </div>
+    <div class="sidebar-files-head">${pr.files.length} ${pr.files.length === 1 ? "file" : "files"} changed</div>
+    ${renderReviewControls(tab)}
+    <div class="file-tree">${renderTreeNodes(tree, tab, "", 0)}</div>
+  `;
+
+  const resolvedToggle = $("showResolvedToggle");
+  if (resolvedToggle) {
+    resolvedToggle.addEventListener("change", () => {
+      state.showResolved = resolvedToggle.checked;
+      persist();
+      renderReview();
+    });
+  }
+
+  // File / overview rows select; folder rows toggle their collapsed state.
+  el.querySelectorAll("[data-view]").forEach((item) => {
+    item.addEventListener("click", () => {
+      tab.selected = item.dataset.view;
+      renderSidebar(tab);
+      renderMain(tab);
+    });
+  });
+  el.querySelectorAll("[data-dir]").forEach((item) => {
+    item.addEventListener("click", () => {
+      const dir = item.dataset.dir;
+      if (tab.collapsedDirs.has(dir)) tab.collapsedDirs.delete(dir);
+      else tab.collapsedDirs.add(dir);
+      renderSidebar(tab);
+    });
+  });
+}
+
+// Build a folder tree from flat file paths. Each node has `dirs` (name -> node)
+// and `files` (the file objects living directly in this folder).
+function buildFileTree(files) {
+  const root = { dirs: new Map(), files: [] };
+  for (const file of files) {
+    const parts = file.filename.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { dirs: new Map(), files: [] });
+      node = node.dirs.get(parts[i]);
+    }
+    node.files.push(file);
+  }
+  return root;
+}
+
+// Render a tree node's folders then files as flat rows, indented by depth.
+// `prefix` is the full path to this node (so each folder has a stable id).
+function renderTreeNodes(node, tab, prefix, depth) {
+  let html = "";
+
+  const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
+  for (const name of dirNames) {
+    // Collapse single-child folder chains into one row, like GitHub:
+    // src → components → Foo.js becomes "src/components/Foo.js" only if each
+    // intermediate folder has exactly one child and no files of its own.
+    let child = node.dirs.get(name);
+    let label = name;
+    let path = prefix + name;
+    while (child.files.length === 0 && child.dirs.size === 1) {
+      const [onlyName, onlyChild] = [...child.dirs.entries()][0];
+      label += "/" + onlyName;
+      path += "/" + onlyName;
+      child = onlyChild;
+    }
+    const collapsed = tab.collapsedDirs.has(path);
+    html += `
+      <div class="tree-row tree-dir${collapsed ? " collapsed" : ""}" data-dir="${esc(path)}" style="--depth:${depth}">
+        <span class="tree-chevron">▶</span>
+        <span class="tree-label">${esc(label)}</span>
+      </div>`;
+    if (!collapsed) html += renderTreeNodes(child, tab, path + "/", depth + 1);
+  }
+
+  const files = [...node.files].sort((a, b) =>
+    a.filename.split("/").pop().localeCompare(b.filename.split("/").pop())
+  );
+  for (const file of files) {
+    const byLine = inlineCommentsByLine(tab, file.filename);
+    const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
+    const active = tab.selected === file.filename ? " active" : "";
+    const base = file.filename.split("/").pop();
+    html += `
+      <div class="tree-row tree-file${active}" data-view="${esc(file.filename)}" title="${esc(file.filename)}" style="--depth:${depth}">
+        <span class="tree-label">${esc(base)}</span>
+        <span class="file-item-meta">
+          <span class="file-status">${file.status}</span>
+          ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
+          <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
+        </span>
+      </div>`;
+  }
+
+  return html;
+}
+
+// Right pane: either the PR description + conversation, or a single file diff.
+function renderMain(tab) {
+  const el = $("fileMain");
+  if (tab.selected === OVERVIEW) {
+    renderOverview(tab, el);
+    return;
+  }
+  const file = tab.data.files.find((f) => f.filename === tab.selected);
+  if (!file) {
+    // Selection no longer resolves (shouldn't happen) — fall back to overview.
+    tab.selected = OVERVIEW;
+    renderSidebar(tab);
+    return renderMain(tab);
+  }
+  el.innerHTML = "";
+  el.appendChild(renderFileDiff(file, tab));
+}
+
+function renderOverview(tab, el) {
+  const pr = tab.data;
+  const body =
+    pr.body && pr.body.trim()
+      ? `<div class="description-body">${esc(pr.body)}</div>`
+      : `<div class="description-body empty">No description provided.</div>`;
+  el.innerHTML = `
+    <div class="pr-description">
+      <h2>Description</h2>
+      ${body}
+    </div>
+    <div class="convo" id="convo"></div>
+  `;
   renderConversation(tab);
 }
 
-function renderFile(file, idx, tab) {
+function renderFileDiff(file, tab) {
   const el = document.createElement("div");
-  el.className = "file" + (idx === 0 ? " open" : "");
+  el.className = "file open";
+
+  const byLine = inlineCommentsByLine(tab, file.filename);
+  const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
+
   const head = document.createElement("div");
-  head.className = "file-head";
+  head.className = "file-head static";
   head.innerHTML = `
-    <span class="file-chevron">▶</span>
     <span class="file-name">${esc(file.filename)}</span>
     <span class="file-status">${file.status}</span>
+    ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
     <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
   `;
-  head.addEventListener("click", () => el.classList.toggle("open"));
   el.appendChild(head);
+  el.appendChild(buildDiffElement(file, tab));
+  return el;
+}
 
+// Builds the rendered diff (rows + any inline comment threads) for one file.
+function buildDiffElement(file, tab) {
   const diff = document.createElement("div");
   diff.className = "diff";
   if (!file.patch) {
     diff.innerHTML = `<div class="binary-note">No text diff available (binary file or too large to display).</div>`;
-  } else {
-    for (const row of parsePatch(file.patch)) {
-      diff.appendChild(renderDiffRow(row, file, tab));
+    return diff;
+  }
+
+  // Inline review comments for this file, grouped by the line they target.
+  const byLine = inlineCommentsByLine(tab, file.filename);
+  const placed = new Set();
+  for (const row of parsePatch(file.patch)) {
+    diff.appendChild(renderDiffRow(row, file, tab));
+    if (row.newLine && byLine.has(row.newLine)) {
+      byLine.get(row.newLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
+      placed.add(row.newLine);
     }
   }
-  el.appendChild(diff);
+  // Comments whose target line isn't in the visible patch (outdated or out of
+  // the shown hunks) still need a home — show them at the end of the file.
+  const orphaned = [...byLine.entries()].filter(([line]) => !placed.has(line));
+  for (const [, arr] of orphaned) {
+    arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true })));
+  }
+  return diff;
+}
+
+// A small toolbar above the diff summarising resolved/outdated inline threads
+// and a toggle to reveal resolved ones (hidden by default, like GitHub).
+function renderReviewControls(tab) {
+  const inline = (tab.comments && tab.comments.inline) || [];
+  const resolved = inline.filter((c) => c.resolved).length;
+  const outdated = inline.filter((c) => c.outdated).length;
+  if (!resolved && !outdated) return "";
+
+  const parts = [];
+  if (resolved) {
+    parts.push(`
+      <label class="review-toggle">
+        <input type="checkbox" id="showResolvedToggle" ${state.showResolved ? "checked" : ""} />
+        Show resolved (${resolved})
+      </label>`);
+  }
+  if (outdated) {
+    parts.push(`<span class="review-stat">${outdated} outdated</span>`);
+  }
+  return `<div class="review-controls">${parts.join("")}</div>`;
+}
+
+// Inline threads visible under the current view filter. Resolved threads are
+// hidden unless the user opts in; outdated threads are always shown (marked).
+function visibleInline(tab) {
+  const inline = (tab.comments && tab.comments.inline) || [];
+  return state.showResolved ? inline : inline.filter((c) => !c.resolved);
+}
+
+// Map of newLine -> [comment, ...] for inline comments on this file.
+function inlineCommentsByLine(tab, filename) {
+  const map = new Map();
+  for (const cm of visibleInline(tab)) {
+    if (cm.path !== filename) continue;
+    const line = cm.line;
+    if (!map.has(line)) map.set(line, []);
+    map.get(line).push(cm);
+  }
+  return map;
+}
+
+function renderInlineThread(cm, opts = {}) {
+  const el = document.createElement("div");
+  const classes = ["inline-comment"];
+  if (opts.orphaned) classes.push("orphaned");
+  if (cm.outdated) classes.push("outdated");
+  if (cm.resolved) classes.push("resolved");
+  el.className = classes.join(" ");
+
+  const badges =
+    (cm.outdated ? `<span class="cm-badge outdated">outdated</span>` : "") +
+    (cm.resolved ? `<span class="cm-badge resolved">resolved</span>` : "");
+  // For orphaned threads (anchor not in the shown diff) note where it lived.
+  const where = opts.orphaned
+    ? `<small>${esc(cm.path)}:${cm.originalLine ?? cm.line ?? "?"}</small>`
+    : "";
+  el.innerHTML = `
+    <div class="comment-head">@${esc(cm.author)}${badges}${where}</div>
+    <div class="comment-body">${esc(cm.body)}</div>`;
   return el;
 }
 
@@ -326,20 +568,19 @@ function renderConversation(tab) {
   if (!c) {
     html += `<div class="notice info">Loading comments…</div>`;
   } else {
-    const all = [
-      ...(c.inline || []).map((x) => ({ ...x, inline: true })),
-      ...(c.conversation || []).map((x) => ({ ...x, inline: false })),
-    ].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    // Inline (code-review) comments render in the diff next to their line; the
+    // conversation section is only top-level PR comments.
+    const all = [...(c.conversation || [])].sort(
+      (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
+    );
 
     if (!all.length) {
-      html += `<div class="notice info">No comments yet.</div>`;
+      html += `<div class="notice info">No conversation comments yet.</div>`;
     } else {
       for (const cm of all) {
         html += `
-          <div class="comment ${cm.inline ? "inline" : ""}">
-            <div class="comment-head">@${esc(cm.author)}${
-          cm.inline ? `<small>${esc(cm.path)}:${cm.line ?? ""}</small>` : ""
-        }</div>
+          <div class="comment">
+            <div class="comment-head">@${esc(cm.author)}</div>
             <div class="comment-body">${esc(cm.body)}</div>
           </div>`;
       }
