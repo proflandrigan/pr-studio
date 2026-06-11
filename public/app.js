@@ -279,6 +279,18 @@ function wireEvents() {
     persist();
   });
 
+  $("addrCommentsBtn").addEventListener("click", () => {
+    const tab = state.tabs.find((t) => t.key === state.active);
+    if (!tab) {
+      consoleEl.classList.remove("collapsed");
+      append("\n⚠ Open a PR tab first — there's no active PR to address comments for.\n", "err");
+      return;
+    }
+    const input = $("agentInput");
+    input.value = buildCommentReviewPrompt(tab.key, agentModeEl.value);
+    input.focus();
+  });
+
   repoPathEl.addEventListener("change", () => {
     if (state.active) {
       state.repoPaths[state.active] = repoPathEl.value.trim();
@@ -1796,6 +1808,19 @@ async function postComment(tab, body, inline, composerEl) {
 }
 
 // ---------- Agent ----------
+// Build the canned task prompt that invokes the pr-comment-review skill against
+// a specific PR, with a note clarifying what the currently-selected mode does.
+function buildCommentReviewPrompt(prRef, mode) {
+  const note =
+    mode === "fix"
+      ? "Mode is `fix` — you may apply edits to address the comments."
+      : "Mode is `review` (read-only) — triage the comments and propose fixes, but do not edit files.";
+  return (
+    `Use the pr-comment-review skill to address the review and discussion ` +
+    `comments on PR ${prRef}. ${note}`
+  );
+}
+
 let agentActive = false;
 async function runAgent() {
   if (agentActive) return;
