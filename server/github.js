@@ -171,6 +171,48 @@ export async function getPullRequest({ owner, repo, number }) {
   };
 }
 
+// GitHub search items reference their repo via an API URL like
+// "https://api.github.com/repos/{owner}/{repo}". Extract the two segments.
+// Returns { owner, repo } or null if the URL doesn't match.
+export function repoFromUrl(repositoryUrl) {
+  if (!repositoryUrl) return null;
+  const m = String(repositoryUrl).match(/\/repos\/([^/]+)\/([^/]+)\/?$/);
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+// Open PRs the authenticated user is involved in (author/assignee/reviewer/
+// commenter/mentioned), most-recently-updated first. Requires a token — the
+// `involves:@me` qualifier needs an authenticated identity — so without one we
+// throw a 401 the route layer surfaces as JSON. Capped at 50; pagination is out
+// of scope.
+export async function listMyPullRequests() {
+  if (!resolveToken()) {
+    throw Object.assign(
+      new Error("A GitHub token is required to detect your pull requests."),
+      { status: 401 }
+    );
+  }
+  const q = encodeURIComponent("is:pr is:open involves:@me");
+  const data = await gh(`/search/issues?q=${q}&sort=updated&order=desc&per_page=50`);
+  return (data.items || [])
+    .map((item) => {
+      const repo = repoFromUrl(item.repository_url);
+      if (!repo) return null;
+      return {
+        owner: repo.owner,
+        repo: repo.repo,
+        number: item.number,
+        title: item.title,
+        state: item.state,           // "open"
+        draft: Boolean(item.draft),
+        author: item.user ? item.user.login : "unknown",
+        url: item.html_url,
+        updatedAt: item.updated_at,
+      };
+    })
+    .filter(Boolean);
+}
+
 // Resolution and outdated state lives on the review *thread*, not the comment,
 // and only GraphQL exposes it. Returns a Map of REST comment id -> { resolved,
 // outdated }. Empty when there's no token (GraphQL unavailable) so REST-only

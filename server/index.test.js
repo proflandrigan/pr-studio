@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert";
 import { app } from "./index.js";
-import { parsePrRef } from "./github.js";
+import { parsePrRef, repoFromUrl } from "./github.js";
 
 let server;
 let baseUrl;
@@ -54,6 +54,26 @@ test("parsePrRef throws with status 400 on invalid input", () => {
     () => parsePrRef("not a pr reference"),
     (err) => err.status === 400
   );
+});
+
+test("repoFromUrl extracts owner and repo from a repository_url", () => {
+  assert.deepStrictEqual(
+    repoFromUrl("https://api.github.com/repos/octocat/hello-world"),
+    { owner: "octocat", repo: "hello-world" }
+  );
+});
+
+test("repoFromUrl tolerates a trailing slash", () => {
+  assert.deepStrictEqual(
+    repoFromUrl("https://api.github.com/repos/octocat/hello-world/"),
+    { owner: "octocat", repo: "hello-world" }
+  );
+});
+
+test("repoFromUrl returns null for unmatched input", () => {
+  assert.strictEqual(repoFromUrl("garbage"), null);
+  assert.strictEqual(repoFromUrl(""), null);
+  assert.strictEqual(repoFromUrl(null), null);
 });
 
 test("GET /api/pr with missing url returns 400 JSON error", async () => {

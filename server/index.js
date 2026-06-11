@@ -17,6 +17,7 @@ import {
   postConversationComment,
   postInlineComment,
   getFileContent,
+  listMyPullRequests,
   hasToken,
   tokenSource,
 } from "./github.js";
@@ -69,6 +70,14 @@ app.get(
     const ref = parsePrRef(req.query.url);
     const pr = await getPullRequest(ref);
     res.json(pr);
+  })
+);
+
+app.get(
+  "/api/my-prs",
+  wrap(async (req, res) => {
+    const prs = await listMyPullRequests();
+    res.json({ prs });
   })
 );
 
