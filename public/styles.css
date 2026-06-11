@@ -520,6 +520,161 @@ body {
   font-size: 11px;
 }
 
+/* ---------- Sidebar view toggle (Files / Chunks) ---------- */
+.sidebar-view-toggle {
+  display: flex;
+  gap: 4px;
+  margin: 10px 8px;
+  padding: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.view-toggle-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 8px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.view-toggle-btn:hover {
+  color: var(--text);
+}
+
+.view-toggle-btn.active {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---------- Chunks view ---------- */
+.chunks-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+  padding: 24px 14px;
+}
+
+.chunks-empty-text {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.chunks-hint {
+  color: var(--muted-dim);
+  font-size: 11.5px;
+}
+
+.chunks-hint.error {
+  color: var(--danger, #e5534b);
+}
+
+.chunks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 6px 8px 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted-dim);
+}
+
+.chunk-section {
+  margin-bottom: 4px;
+}
+
+.chunk-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.chunk-head:hover {
+  background: var(--panel-2);
+}
+
+.chunk-chevron {
+  flex: none;
+  width: 10px;
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 0.12s;
+}
+
+.chunk-section:not(.collapsed) .chunk-chevron {
+  transform: rotate(90deg);
+}
+
+.chunk-index {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.chunk-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.chunk-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted-dim);
+}
+
+.chunk-body {
+  padding: 0 8px 10px calc(10px + 18px + 8px);
+}
+
+.chunk-section.collapsed .chunk-body {
+  display: none;
+}
+
+.chunk-narrative {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 6px;
+}
+
+.chunk-files {
+  display: flex;
+  flex-direction: column;
+}
+
+.chunk-file {
+  padding-left: 10px;
+}
+
 .pr-title {
   font-size: 19px;
   font-weight: 600;
@@ -1301,4 +1456,26 @@ body {
   * {
     transition: none !important;
   }
+}
+
+.chunks-progress {
+  color: var(--muted-dim);
+}
+.chunk-reviewed-wrap {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.chunk-reviewed {
+  cursor: pointer;
+  margin: 0;
+}
+.chunk-section.reviewed .chunk-head {
+  opacity: 0.5;
+}
+.chunk-section.reviewed .chunk-title {
+  text-decoration: line-through;
+}
+.chunk-section.reviewed .chunk-body {
+  display: none;
 }
