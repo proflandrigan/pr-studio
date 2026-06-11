@@ -567,8 +567,10 @@ function renderFileDiff(file, tab) {
     [...byLine.right.values()].reduce((n, arr) => n + arr.length, 0) +
     [...byLine.left.values()].reduce((n, arr) => n + arr.length, 0);
 
-  const showToggle = isMarkdownFile(file.filename);
+  const isNotebook = isNotebookFile(file.filename);
+  const showToggle = isMarkdownFile(file.filename) || isNotebook;
   const mode = getFileViewMode(tab, file);
+  const toggleLabel = isNotebook ? "Rendered" : "Preview";
 
   const head = document.createElement("div");
   head.className = "file-head static";
@@ -580,7 +582,7 @@ function renderFileDiff(file, tab) {
     ${showToggle ? `
       <label class="review-toggle view-mode-toggle">
         <input type="checkbox" class="view-mode-input" ${mode === "preview" ? "checked" : ""} />
-        Preview
+        ${toggleLabel}
       </label>` : ""}
   `;
   el.appendChild(head);
@@ -590,7 +592,11 @@ function renderFileDiff(file, tab) {
   el.appendChild(body);
 
   if (showToggle && mode === "preview") {
-    renderPreview(file, tab, body);
+    if (isNotebook) {
+      renderNotebookPreview(file, tab, body);
+    } else {
+      renderPreview(file, tab, body);
+    }
   } else {
     body.appendChild(buildDiffElement(file, tab));
   }
@@ -610,12 +616,17 @@ function isMarkdownFile(filename) {
   return /\.(md|markdown)$/i.test(filename);
 }
 
+function isNotebookFile(filename) {
+  return /\.ipynb$/i.test(filename);
+}
+
 // Lazily-initialized, per-tab, transient (not persisted) view-mode map. Markdown
-// files default to "preview"; everything else defaults to "diff".
+// and notebook files default to "preview"; everything else defaults to "diff".
 function getFileViewMode(tab, file) {
   tab.fileViewModes = tab.fileViewModes || {};
   if (!(file.filename in tab.fileViewModes)) {
-    tab.fileViewModes[file.filename] = isMarkdownFile(file.filename) ? "preview" : "diff";
+    tab.fileViewModes[file.filename] =
+      (isMarkdownFile(file.filename) || isNotebookFile(file.filename)) ? "preview" : "diff";
   }
   return tab.fileViewModes[file.filename];
 }
@@ -844,6 +855,231 @@ async function renderPreview(file, tab, container) {
 
   container.innerHTML = "";
   container.appendChild(buildPreviewElement(file, tab, content));
+}
+
+// ---------- Notebook preview ----------
+
+// nbformat `source` fields are either a string or an array of strings (each
+// already including its trailing newline). Normalize to a single string.
+function joinSource(src) {
+  if (Array.isArray(src)) return src.join("");
+  return src == null ? "" : String(src);
+}
+
+// Maps each cell in `notebook.cells` to a 1-indexed, inclusive raw-line span
+// in `rawContent`, by scanning for `"cell_type":` occurrences in source order.
+// Returns null if the number of matches doesn't line up with the cell count
+// (caller still renders cells, just without click-to-comment).
+function mapCellsToRawLines(rawContent, notebook) {
+  const cells = notebook.cells || [];
+  const lines = rawContent.split("\n");
+  const cellTypeRe = /"cell_type"\s*:/;
+  const matchLines = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (cellTypeRe.test(lines[i])) matchLines.push(i + 1); // 1-indexed
+  }
+  if (matchLines.length !== cells.length) return null;
+
+  const spans = [];
+  for (let i = 0; i < matchLines.length; i++) {
+    const startLine = matchLines[i];
+    const endLine = i + 1 < matchLines.length ? matchLines[i + 1] - 1 : lines.length;
+    spans.push({ startLine, endLine });
+  }
+  return spans;
+}
+
+// Renders a single cell's `outputs` array (stream/error/execute_result/display_data).
+function renderNotebookOutputs(outputs) {
+  const frag = document.createDocumentFragment();
+  for (const output of outputs || []) {
+    if (output.output_type === "stream") {
+      const pre = document.createElement("pre");
+      pre.className = "nb-output nb-stream";
+      if (output.name === "stderr") pre.classList.add("nb-stderr");
+      pre.innerHTML = esc(joinSource(output.text));
+      frag.appendChild(pre);
+      continue;
+    }
+
+    if (output.output_type === "error") {
+      const traceback = (output.traceback || []).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+      const pre = document.createElement("pre");
+      pre.className = "nb-output nb-error";
+      pre.innerHTML = esc(traceback);
+      frag.appendChild(pre);
+      continue;
+    }
+
+    if (output.output_type === "execute_result" || output.output_type === "display_data") {
+      const data = output.data || {};
+      const imgMime = data["image/png"] ? "image/png" : (data["image/jpeg"] ? "image/jpeg" : null);
+      if (imgMime) {
+        const img = document.createElement("img");
+        img.className = "nb-output nb-image";
+        img.src = `data:${imgMime};base64,${joinSource(data[imgMime])}`;
+        frag.appendChild(img);
+      } else if (data["text/plain"]) {
+        const pre = document.createElement("pre");
+        pre.className = "nb-output";
+        pre.innerHTML = esc(joinSource(data["text/plain"]));
+        frag.appendChild(pre);
+      } else if (data["text/html"]) {
+        const pre = document.createElement("pre");
+        pre.className = "nb-output nb-html-note";
+        pre.innerHTML = esc(joinSource(data["text/html"]));
+        frag.appendChild(pre);
+      }
+      continue;
+    }
+    // Unknown output types are ignored.
+  }
+  return frag;
+}
+
+// Renders a notebook file's content as a series of cells, with right-side
+// inline comments threaded in and "commentable" cells clickable to open the
+// composer (reusing the existing inline-comment posting flow).
+function buildNotebookElement(file, tab, content) {
+  let nb;
+  try {
+    nb = JSON.parse(content);
+  } catch (e) {
+    const root = document.createElement("div");
+    root.innerHTML = `<div class="binary-note">Could not parse notebook JSON</div>`;
+    return root;
+  }
+
+  const root = document.createElement("div");
+  root.className = "nb-preview";
+
+  const commentableRight = new Set();
+  if (file.patch) {
+    for (const row of parsePatch(file.patch)) {
+      if ((row.type === "add" || row.type === "context") && row.newLine) {
+        commentableRight.add(row.newLine);
+      }
+    }
+  }
+
+  const byLine = inlineCommentsByLine(tab, file.filename);
+  const placedRight = new Set();
+  const cellSpans = mapCellsToRawLines(content, nb);
+  const cells = nb.cells || [];
+
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i];
+    let cellEl;
+
+    if (cell.cell_type === "markdown") {
+      cellEl = document.createElement("div");
+      cellEl.className = "nb-cell nb-md md-preview";
+      cellEl.innerHTML = mdParse(joinSource(cell.source), { gfm: true, breaks: false });
+    } else if (cell.cell_type === "code") {
+      cellEl = document.createElement("div");
+      cellEl.className = "nb-cell nb-code";
+
+      const prompt = document.createElement("div");
+      prompt.className = "nb-prompt";
+      prompt.textContent = `In [${cell.execution_count ?? " "}]:`;
+      cellEl.appendChild(prompt);
+
+      const pre = document.createElement("pre");
+      pre.className = "nb-source";
+      pre.innerHTML = `<code>${esc(joinSource(cell.source))}</code>`;
+      cellEl.appendChild(pre);
+
+      cellEl.appendChild(renderNotebookOutputs(cell.outputs || []));
+    } else {
+      // Unknown cell types (e.g. raw): render source as plain text.
+      cellEl = document.createElement("div");
+      cellEl.className = "nb-cell nb-raw";
+      const pre = document.createElement("pre");
+      pre.className = "nb-source";
+      pre.innerHTML = `<code>${esc(joinSource(cell.source))}</code>`;
+      cellEl.appendChild(pre);
+    }
+
+    if (cellSpans) {
+      const span = cellSpans[i];
+      let target = null;
+      for (let ln = span.startLine; ln <= span.endLine; ln++) {
+        if (commentableRight.has(ln)) { target = ln; break; }
+      }
+      if (target != null) {
+        cellEl.classList.add("commentable");
+        cellEl.addEventListener("click", (e) => {
+          if (e.target.closest("a")) return;
+          openInlineComposer(cellEl, file, { side: "RIGHT", line: target }, tab);
+        });
+      }
+    }
+
+    root.appendChild(cellEl);
+
+    if (cellSpans) {
+      const span = cellSpans[i];
+      for (let ln = span.startLine; ln <= span.endLine; ln++) {
+        if (byLine.right.has(ln) && !placedRight.has(ln)) {
+          byLine.right.get(ln).forEach((cm) => root.appendChild(renderInlineThread(cm)));
+          placedRight.add(ln);
+        }
+      }
+    }
+  }
+
+  const orphanedRight = [...byLine.right.entries()].filter(([line]) => !placedRight.has(line));
+  for (const [, arr] of orphanedRight) {
+    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true })));
+  }
+  // LEFT-side comments target removed lines, which have no home in a preview
+  // of the current file content — show them as orphaned, like outdated threads.
+  for (const arr of byLine.left.values()) {
+    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true })));
+  }
+
+  return root;
+}
+
+// Loads (and caches per-tab) a notebook file's content and renders it into
+// `container`. Mirrors renderPreview's staleness guards and error fallback.
+async function renderNotebookPreview(file, tab, container) {
+  container.innerHTML = `<div class="preview-loading">Loading preview…</div>`;
+
+  tab.fileContents = tab.fileContents || {};
+  if (!tab.fileContents[file.filename]) {
+    tab.fileContents[file.filename] = fetchFileContent(tab, file.filename);
+  }
+
+  let content;
+  try {
+    content = await tab.fileContents[file.filename];
+  } catch (e) {
+    if (tab.selected !== file.filename || getFileViewMode(tab, file) !== "preview") return;
+    if (!container.isConnected) return;
+    delete tab.fileContents[file.filename];
+    container.innerHTML = "";
+    const note = document.createElement("div");
+    note.className = "binary-note";
+    note.textContent = `Failed to load preview: ${e.message}`;
+    const btn = document.createElement("button");
+    btn.className = "btn ghost";
+    btn.type = "button";
+    btn.textContent = "Show diff";
+    btn.addEventListener("click", () => {
+      tab.fileViewModes[file.filename] = "diff";
+      renderMain(tab);
+    });
+    container.appendChild(note);
+    container.appendChild(btn);
+    return;
+  }
+
+  if (tab.selected !== file.filename || getFileViewMode(tab, file) !== "preview") return;
+  if (!container.isConnected) return;
+
+  container.innerHTML = "";
+  container.appendChild(buildNotebookElement(file, tab, content));
 }
 
 // Builds the rendered diff (rows + any inline comment threads) for one file.
