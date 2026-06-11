@@ -1,0 +1,492 @@
+"use strict";
+
+// ---------- State ----------
+const LS_KEY = "pr-studio:state:v1";
+const state = {
+  tabs: [], // { key, owner, repo, number, title, state, draft, data, comments }
+  active: null,
+  repoPaths: {}, // key -> local path
+  agentMode: "review",
+};
+
+function keyOf(o, r, n) {
+  return `${o}/${r}#${n}`;
+}
+
+function persist() {
+  const slim = {
+    refs: state.tabs.map((t) => ({ owner: t.owner, repo: t.repo, number: t.number })),
+    active: state.active,
+    repoPaths: state.repoPaths,
+    agentMode: state.agentMode,
+  };
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(slim));
+  } catch {}
+}
+
+function loadPersisted() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+// ---------- DOM ----------
+const $ = (id) => document.getElementById(id);
+const tabsEl = $("tabs");
+const reviewEl = $("review");
+const emptyEl = $("empty");
+const statusEl = $("status");
+const consoleEl = $("console");
+const consoleOut = $("consoleOut");
+const repoPathEl = $("repoPath");
+const agentModeEl = $("agentMode");
+
+// ---------- Boot ----------
+init();
+
+async function init() {
+  // health
+  try {
+    const h = await fetch("/api/health").then((r) => r.json());
+    statusEl.classList.add(h.githubToken ? "ok" : "warn");
+    statusEl.title = h.githubToken
+      ? "GitHub token detected — comments enabled"
+      : "No GitHub token — read-only for public PRs, can't post comments";
+    if (h.defaultRepoPath) repoPathEl.value = h.defaultRepoPath;
+  } catch {
+    statusEl.title = "Server unreachable";
+  }
+
+  const saved = loadPersisted();
+  if (saved) {
+    state.repoPaths = saved.repoPaths || {};
+    state.agentMode = saved.agentMode || "review";
+    agentModeEl.value = state.agentMode;
+    for (const ref of saved.refs || []) {
+      await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
+    }
+    if (saved.active && state.tabs.find((t) => t.key === saved.active)) {
+      activate(saved.active);
+    } else if (state.tabs.length) {
+      activate(state.tabs[0].key);
+    }
+  }
+
+  wireEvents();
+}
+
+function wireEvents() {
+  $("openForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = $("prInput").value.trim();
+    if (v) {
+      openPr(v);
+      $("prInput").value = "";
+    }
+  });
+
+  $("agentForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    runAgent();
+  });
+
+  $("clearConsole").addEventListener("click", () => {
+    consoleOut.textContent = "";
+  });
+
+  // Collapse console by clicking its label area
+  $("console").querySelector(".console-head").addEventListener("click", (e) => {
+    if (e.target.closest(".console-controls")) return;
+    consoleEl.classList.toggle("collapsed");
+  });
+
+  agentModeEl.addEventListener("change", () => {
+    state.agentMode = agentModeEl.value;
+    persist();
+  });
+
+  repoPathEl.addEventListener("change", () => {
+    if (state.active) {
+      state.repoPaths[state.active] = repoPathEl.value.trim();
+      persist();
+    }
+  });
+}
+
+// ---------- Open / fetch PR ----------
+async function openPr(ref, opts = {}) {
+  let parsed;
+  try {
+    parsed = await fetch(`/api/pr?url=${encodeURIComponent(ref)}`).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || "Failed to load PR");
+      return body;
+    });
+  } catch (e) {
+    if (!opts.silent) flashError(e.message);
+    return;
+  }
+
+  const key = keyOf(parsed.owner, parsed.repo, parsed.number);
+  const existing = state.tabs.find((t) => t.key === key);
+  const tab = {
+    key,
+    owner: parsed.owner,
+    repo: parsed.repo,
+    number: parsed.number,
+    title: parsed.title,
+    state: parsed.state,
+    draft: parsed.draft,
+    data: parsed,
+    comments: null,
+  };
+  if (existing) {
+    Object.assign(existing, tab);
+  } else {
+    state.tabs.push(tab);
+  }
+  renderTabs();
+  activate(key);
+  loadComments(key);
+  persist();
+}
+
+async function loadComments(key) {
+  const tab = state.tabs.find((t) => t.key === key);
+  if (!tab) return;
+  try {
+    const c = await fetch(
+      `/api/pr/comments?owner=${tab.owner}&repo=${tab.repo}&number=${tab.number}`
+    ).then((r) => r.json());
+    tab.comments = c;
+    if (state.active === key) renderReview();
+  } catch {
+    /* comments are best-effort */
+  }
+}
+
+// ---------- Tabs ----------
+function renderTabs() {
+  tabsEl.innerHTML = "";
+  for (const tab of state.tabs) {
+    const el = document.createElement("div");
+    el.className = "tab" + (tab.key === state.active ? " active" : "");
+    el.title = tab.title;
+
+    const dotState = tab.draft ? "draft" : tab.state;
+    el.innerHTML = `
+      <span class="tab-dot ${dotState}"></span>
+      <span class="tab-label">${tab.repo}#${tab.number}</span>
+      <button class="tab-close" title="Close">×</button>
+    `;
+    el.addEventListener("click", (e) => {
+      if (e.target.closest(".tab-close")) {
+        closeTab(tab.key);
+      } else {
+        activate(tab.key);
+      }
+    });
+    tabsEl.appendChild(el);
+  }
+}
+
+function closeTab(key) {
+  const i = state.tabs.findIndex((t) => t.key === key);
+  if (i < 0) return;
+  state.tabs.splice(i, 1);
+  if (state.active === key) {
+    const next = state.tabs[i] || state.tabs[i - 1];
+    state.active = next ? next.key : null;
+  }
+  renderTabs();
+  if (state.active) {
+    renderReview();
+  } else {
+    showEmpty();
+  }
+  persist();
+}
+
+function activate(key) {
+  state.active = key;
+  const tab = state.tabs.find((t) => t.key === key);
+  if (tab) repoPathEl.value = state.repoPaths[key] || repoPathEl.value || "";
+  renderTabs();
+  renderReview();
+  persist();
+}
+
+function showEmpty() {
+  emptyEl.hidden = false;
+  reviewEl.hidden = true;
+}
+
+// ---------- Render review ----------
+function renderReview() {
+  const tab = state.tabs.find((t) => t.key === state.active);
+  if (!tab) return showEmpty();
+  emptyEl.hidden = true;
+  reviewEl.hidden = false;
+
+  const pr = tab.data;
+  const stateClass = tab.draft ? "draft" : pr.state;
+  const stateLabel = tab.draft ? "draft" : pr.state;
+
+  reviewEl.innerHTML = `
+    <div class="pr-head">
+      <h1 class="pr-title"><a href="${pr.url}" target="_blank" rel="noopener">${esc(pr.title)}</a></h1>
+      <div class="pr-meta">
+        <span class="badge ${stateClass}">${stateLabel}</span>
+        <span>@${esc(pr.author)}</span>
+        <span class="branch"><b>${esc(pr.headRef || "")}</b> → <b>${esc(pr.baseRef || "")}</b></span>
+        <span class="diffstat"><span class="plus">+${pr.additions ?? 0}</span> <span class="minus">−${pr.deletions ?? 0}</span> · ${pr.changedFiles ?? pr.files.length} files</span>
+      </div>
+    </div>
+    <div id="files"></div>
+    <div class="convo" id="convo"></div>
+  `;
+
+  const filesEl = $("files");
+  pr.files.forEach((file, idx) => filesEl.appendChild(renderFile(file, idx, tab)));
+  renderConversation(tab);
+}
+
+function renderFile(file, idx, tab) {
+  const el = document.createElement("div");
+  el.className = "file" + (idx === 0 ? " open" : "");
+  const head = document.createElement("div");
+  head.className = "file-head";
+  head.innerHTML = `
+    <span class="file-chevron">▶</span>
+    <span class="file-name">${esc(file.filename)}</span>
+    <span class="file-status">${file.status}</span>
+    <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
+  `;
+  head.addEventListener("click", () => el.classList.toggle("open"));
+  el.appendChild(head);
+
+  const diff = document.createElement("div");
+  diff.className = "diff";
+  if (!file.patch) {
+    diff.innerHTML = `<div class="binary-note">No text diff available (binary file or too large to display).</div>`;
+  } else {
+    for (const row of parsePatch(file.patch)) {
+      diff.appendChild(renderDiffRow(row, file, tab));
+    }
+  }
+  el.appendChild(diff);
+  return el;
+}
+
+function renderDiffRow(row, file, tab) {
+  const el = document.createElement("div");
+  el.className = "diff-row " + row.type;
+  const canComment = row.type === "add" || row.type === "context";
+  if (canComment) el.classList.add("commentable");
+
+  el.innerHTML = `<span class="ln">${row.newLine ?? ""}</span><span class="code">${esc(row.text)}</span>`;
+
+  if (canComment && row.newLine) {
+    el.addEventListener("click", () => openInlineComposer(el, file, row, tab));
+  }
+  return el;
+}
+
+function openInlineComposer(rowEl, file, row, tab) {
+  // one composer at a time
+  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  const box = document.createElement("div");
+  box.className = "inline-composer";
+  box.innerHTML = `
+    <textarea placeholder="Comment on ${esc(file.filename)}:${row.newLine} — Cmd/Ctrl+Enter to post"></textarea>
+    <button class="btn accent" type="button">Post</button>
+    <button class="btn ghost" type="button">Cancel</button>
+  `;
+  const ta = box.querySelector("textarea");
+  const [postBtn, cancelBtn] = box.querySelectorAll("button");
+  const post = () => postComment(tab, ta.value, { path: file.filename, line: row.newLine }, box);
+  postBtn.addEventListener("click", post);
+  cancelBtn.addEventListener("click", () => box.remove());
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") post();
+    if (e.key === "Escape") box.remove();
+  });
+  rowEl.insertAdjacentElement("afterend", box);
+  ta.focus();
+}
+
+function renderConversation(tab) {
+  const el = $("convo");
+  const c = tab.comments;
+  let html = `<h2>Conversation</h2>`;
+
+  if (!c) {
+    html += `<div class="notice info">Loading comments…</div>`;
+  } else {
+    const all = [
+      ...(c.inline || []).map((x) => ({ ...x, inline: true })),
+      ...(c.conversation || []).map((x) => ({ ...x, inline: false })),
+    ].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    if (!all.length) {
+      html += `<div class="notice info">No comments yet.</div>`;
+    } else {
+      for (const cm of all) {
+        html += `
+          <div class="comment ${cm.inline ? "inline" : ""}">
+            <div class="comment-head">@${esc(cm.author)}${
+          cm.inline ? `<small>${esc(cm.path)}:${cm.line ?? ""}</small>` : ""
+        }</div>
+            <div class="comment-body">${esc(cm.body)}</div>
+          </div>`;
+      }
+    }
+  }
+
+  html += `
+    <div class="composer">
+      <textarea id="convoInput" placeholder="Leave a comment on this PR — Cmd/Ctrl+Enter to post"></textarea>
+      <button class="btn accent" id="convoPost" type="button">Comment</button>
+    </div>`;
+  el.innerHTML = html;
+
+  const input = $("convoInput");
+  const send = () => postComment(tab, input.value, null);
+  $("convoPost").addEventListener("click", send);
+  input.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") send();
+  });
+}
+
+// ---------- Posting comments ----------
+async function postComment(tab, body, inline, composerEl) {
+  body = (body || "").trim();
+  if (!body) return;
+  const payload = {
+    owner: tab.owner,
+    repo: tab.repo,
+    number: tab.number,
+    body,
+  };
+  if (inline) {
+    payload.path = inline.path;
+    payload.line = inline.line;
+    payload.commitId = tab.data.headSha;
+  }
+  try {
+    const r = await fetch("/api/pr/comment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const res = await r.json();
+    if (!r.ok) throw new Error(res.error || "Failed to post");
+    if (composerEl) composerEl.remove();
+    loadComments(tab.key);
+  } catch (e) {
+    flashError("Comment failed: " + e.message);
+  }
+}
+
+// ---------- Agent ----------
+let agentActive = false;
+async function runAgent() {
+  if (agentActive) return;
+  const input = $("agentInput");
+  const prompt = input.value.trim();
+  if (!prompt) return;
+
+  consoleEl.classList.remove("collapsed");
+  const repoPath = repoPathEl.value.trim();
+  if (state.active) {
+    state.repoPaths[state.active] = repoPath;
+    persist();
+  }
+
+  append(`\n› ${prompt}\n`, "sys");
+  input.value = "";
+  agentActive = true;
+  $("agentRun").disabled = true;
+
+  try {
+    const res = await fetch("/api/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, repoPath, mode: agentModeEl.value }),
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      append(dec.decode(value, { stream: true }));
+    }
+  } catch (e) {
+    append(`\n⚠ ${e.message}\n`, "err");
+  } finally {
+    agentActive = false;
+    $("agentRun").disabled = false;
+    // a finished agent run may have changed files — nothing to refetch from GitHub,
+    // but remind the user their local checkout moved.
+  }
+}
+
+function append(text, cls) {
+  const node = document.createElement("span");
+  if (cls) node.className = cls;
+  node.textContent = text;
+  consoleOut.appendChild(node);
+  consoleOut.scrollTop = consoleOut.scrollHeight;
+}
+
+// ---------- Diff parsing ----------
+function parsePatch(patch) {
+  const rows = [];
+  let newLine = 0;
+  let oldLine = 0;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("@@")) {
+      const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) {
+        oldLine = Number(m[1]);
+        newLine = Number(m[2]);
+      }
+      rows.push({ type: "hunk", text: line, newLine: null });
+      continue;
+    }
+    const sign = line[0];
+    const text = line.slice(1);
+    if (sign === "+") {
+      rows.push({ type: "add", text, newLine: newLine });
+      newLine++;
+    } else if (sign === "-") {
+      rows.push({ type: "del", text, newLine: null, oldLine });
+      oldLine++;
+    } else {
+      rows.push({ type: "context", text, newLine: newLine });
+      newLine++;
+      oldLine++;
+    }
+  }
+  return rows;
+}
+
+// ---------- Utils ----------
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function flashError(msg) {
+  const stage = reviewEl.hidden ? emptyEl : reviewEl;
+  const n = document.createElement("div");
+  n.className = "notice error";
+  n.textContent = msg;
+  stage.prepend(n);
+  setTimeout(() => n.remove(), 6000);
+}

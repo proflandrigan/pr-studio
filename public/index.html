@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#13161d" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <title>PR Studio</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">⌥</span>
+        <span class="brand-name">PR&nbsp;Studio</span>
+      </div>
+      <form class="open-pr" id="openForm">
+        <input
+          id="prInput"
+          class="pr-input"
+          type="text"
+          placeholder="Paste a PR URL or owner/repo#123, then Enter"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button class="btn" type="submit">Open</button>
+      </form>
+      <div class="status" id="status" title="Connection status"></div>
+    </header>
+
+    <nav class="tabs" id="tabs"></nav>
+
+    <main class="stage" id="stage">
+      <section class="empty" id="empty">
+        <div class="empty-art">⟋⟍</div>
+        <h1>No pull request open</h1>
+        <p>Paste a GitHub PR link above to start reviewing. Open several — each becomes a tab.</p>
+      </section>
+      <section class="review" id="review" hidden></section>
+    </main>
+
+    <section class="console" id="console" aria-label="Claude Code agent">
+      <div class="console-head">
+        <span class="console-glyph">◗</span>
+        <span class="console-label">Claude Code</span>
+        <div class="console-controls">
+          <label class="mode" title="review = read-only · fix = allows edits">
+            <select id="agentMode">
+              <option value="review">review (read-only)</option>
+              <option value="fix">fix (allows edits)</option>
+            </select>
+          </label>
+          <input
+            id="repoPath"
+            class="repo-path"
+            type="text"
+            placeholder="/path/to/local/checkout"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button class="btn ghost" id="clearConsole" type="button">Clear</button>
+        </div>
+      </div>
+      <pre class="console-out" id="consoleOut"></pre>
+      <form class="console-in" id="agentForm">
+        <span class="prompt-glyph">›</span>
+        <input
+          id="agentInput"
+          class="agent-input"
+          type="text"
+          placeholder="Task the agent — e.g. address the review comments in src/auth.js"
+          autocomplete="off"
+        />
+        <button class="btn accent" id="agentRun" type="submit">Run</button>
+      </form>
+    </section>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
