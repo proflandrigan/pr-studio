@@ -519,6 +519,42 @@ body {
   border-color: var(--accent);
 }
 
+/* posted inline review comment, shown beneath its diff line */
+.inline-comment {
+  background: var(--panel);
+  border-left: 3px solid var(--accent);
+  border-bottom: 1px solid var(--line-soft);
+  padding: 10px 14px;
+  white-space: normal;
+}
+.inline-comment .comment-head {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  margin-bottom: 5px;
+}
+.inline-comment .comment-head small {
+  color: var(--muted);
+  margin-left: 8px;
+}
+.inline-comment .comment-body {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.inline-comment.orphaned {
+  border-left-color: var(--muted-dim);
+  opacity: 0.85;
+}
+
+.file-comment-count {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 8px;
+}
+
 /* ---------- Conversation / general comment ---------- */
 .convo {
   margin-top: 26px;

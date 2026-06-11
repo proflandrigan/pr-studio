@@ -249,6 +249,12 @@ function renderReview() {
     <div class="convo" id="convo"></div>
   `;
 
+  // Which files are expanded is transient UI state kept on the in-memory tab so
+  // it survives re-renders (e.g. after posting a comment). Default: first file.
+  if (!tab.openFiles) {
+    tab.openFiles = new Set(pr.files.length ? [pr.files[0].filename] : []);
+  }
+
   const filesEl = $("files");
   pr.files.forEach((file, idx) => filesEl.appendChild(renderFile(file, idx, tab)));
   renderConversation(tab);
@@ -256,16 +262,26 @@ function renderReview() {
 
 function renderFile(file, idx, tab) {
   const el = document.createElement("div");
-  el.className = "file" + (idx === 0 ? " open" : "");
+  el.className = "file" + (tab.openFiles.has(file.filename) ? " open" : "");
   const head = document.createElement("div");
   head.className = "file-head";
+
+  // Inline review comments for this file, grouped by the line they target.
+  const byLine = inlineCommentsByLine(tab, file.filename);
+  const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
+
   head.innerHTML = `
     <span class="file-chevron">▶</span>
     <span class="file-name">${esc(file.filename)}</span>
     <span class="file-status">${file.status}</span>
+    ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
     <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
   `;
-  head.addEventListener("click", () => el.classList.toggle("open"));
+  head.addEventListener("click", () => {
+    const open = el.classList.toggle("open");
+    if (open) tab.openFiles.add(file.filename);
+    else tab.openFiles.delete(file.filename);
+  });
   el.appendChild(head);
 
   const diff = document.createElement("div");
@@ -273,11 +289,45 @@ function renderFile(file, idx, tab) {
   if (!file.patch) {
     diff.innerHTML = `<div class="binary-note">No text diff available (binary file or too large to display).</div>`;
   } else {
+    const placed = new Set();
     for (const row of parsePatch(file.patch)) {
       diff.appendChild(renderDiffRow(row, file, tab));
+      if (row.newLine && byLine.has(row.newLine)) {
+        byLine.get(row.newLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
+        placed.add(row.newLine);
+      }
+    }
+    // Comments whose target line isn't in the visible patch (outdated or out of
+    // the shown hunks) still need a home — show them at the end of the file.
+    const orphaned = [...byLine.entries()].filter(([line]) => !placed.has(line));
+    for (const [, arr] of orphaned) {
+      arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true })));
     }
   }
   el.appendChild(diff);
+  return el;
+}
+
+// Map of newLine -> [comment, ...] for inline comments on this file.
+function inlineCommentsByLine(tab, filename) {
+  const map = new Map();
+  const inline = (tab.comments && tab.comments.inline) || [];
+  for (const cm of inline) {
+    if (cm.path !== filename) continue;
+    const line = cm.line;
+    if (!map.has(line)) map.set(line, []);
+    map.get(line).push(cm);
+  }
+  return map;
+}
+
+function renderInlineThread(cm, opts = {}) {
+  const el = document.createElement("div");
+  el.className = "inline-comment" + (opts.orphaned ? " orphaned" : "");
+  const where = opts.orphaned ? `<small>${esc(cm.path)}:${cm.line ?? "?"} (outdated)</small>` : "";
+  el.innerHTML = `
+    <div class="comment-head">@${esc(cm.author)}${where}</div>
+    <div class="comment-body">${esc(cm.body)}</div>`;
   return el;
 }
 
@@ -326,20 +376,19 @@ function renderConversation(tab) {
   if (!c) {
     html += `<div class="notice info">Loading comments…</div>`;
   } else {
-    const all = [
-      ...(c.inline || []).map((x) => ({ ...x, inline: true })),
-      ...(c.conversation || []).map((x) => ({ ...x, inline: false })),
-    ].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    // Inline (code-review) comments render in the diff next to their line; the
+    // conversation section is only top-level PR comments.
+    const all = [...(c.conversation || [])].sort(
+      (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
+    );
 
     if (!all.length) {
-      html += `<div class="notice info">No comments yet.</div>`;
+      html += `<div class="notice info">No conversation comments yet.</div>`;
     } else {
       for (const cm of all) {
         html += `
-          <div class="comment ${cm.inline ? "inline" : ""}">
-            <div class="comment-head">@${esc(cm.author)}${
-          cm.inline ? `<small>${esc(cm.path)}:${cm.line ?? ""}</small>` : ""
-        }</div>
+          <div class="comment">
+            <div class="comment-head">@${esc(cm.author)}</div>
             <div class="comment-body">${esc(cm.body)}</div>
           </div>`;
       }
