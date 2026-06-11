@@ -238,6 +238,24 @@ export async function getComments({ owner, repo, number }) {
   };
 }
 
+// Fetches a single file's content at a given ref via the Contents API. Used to
+// render markdown previews. Encodes each path segment separately so slashes in
+// the path are preserved while special characters in filenames are escaped.
+export async function getFileContent({ owner, repo, path, ref }) {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  const data = await gh(`/repos/${owner}/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`);
+  if (data.type !== "file" || data.encoding !== "base64") {
+    throw Object.assign(new Error("Path is not a file"), { status: 400 });
+  }
+  if (!data.content && data.size > 0) {
+    throw Object.assign(new Error("File too large to preview"), { status: 413 });
+  }
+  return {
+    content: Buffer.from(data.content, "base64").toString("utf8"),
+    sha: data.sha,
+  };
+}
+
 export async function postConversationComment({ owner, repo, number, body }) {
   return gh(`/repos/${owner}/${repo}/issues/${number}/comments`, {
     method: "POST",
