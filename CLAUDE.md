@@ -13,7 +13,7 @@ back to the browser.
 ## Commands
 
 ```bash
-npm install        # one dependency: express
+npm install        # express (server) + marked (frontend markdown rendering, served statically)
 npm start          # node server/index.js → http://localhost:4317
 npm test           # node --test server/ — built-in test runner, no extra deps
 ```

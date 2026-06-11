@@ -282,6 +282,10 @@ async function openPr(ref, opts = {}) {
     comments: null,
   };
   if (existing) {
+    // The new tab.data may carry a different headSha; any cached file content
+    // (fetched for markdown previews) was fetched against the old SHA and must
+    // be refetched. fileViewModes/collapsedDirs are fine to keep across reloads.
+    delete existing.fileContents;
     Object.assign(existing, tab);
   } else {
     state.tabs.push(tab);
@@ -563,6 +567,9 @@ function renderFileDiff(file, tab) {
     [...byLine.right.values()].reduce((n, arr) => n + arr.length, 0) +
     [...byLine.left.values()].reduce((n, arr) => n + arr.length, 0);
 
+  const showToggle = isMarkdownFile(file.filename);
+  const mode = getFileViewMode(tab, file);
+
   const head = document.createElement("div");
   head.className = "file-head static";
   head.innerHTML = `
@@ -570,10 +577,273 @@ function renderFileDiff(file, tab) {
     <span class="file-status">${file.status}</span>
     ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
     <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
+    ${showToggle ? `
+      <label class="review-toggle view-mode-toggle">
+        <input type="checkbox" class="view-mode-input" ${mode === "preview" ? "checked" : ""} />
+        Preview
+      </label>` : ""}
   `;
   el.appendChild(head);
-  el.appendChild(buildDiffElement(file, tab));
+
+  const body = document.createElement("div");
+  body.className = "file-body";
+  el.appendChild(body);
+
+  if (showToggle && mode === "preview") {
+    renderPreview(file, tab, body);
+  } else {
+    body.appendChild(buildDiffElement(file, tab));
+  }
+
+  if (showToggle) {
+    head.querySelector(".view-mode-input").addEventListener("change", (e) => {
+      tab.fileViewModes[file.filename] = e.target.checked ? "preview" : "diff";
+      renderMain(tab);
+    });
+  }
+
   return el;
+}
+
+// ---------- Markdown preview ----------
+function isMarkdownFile(filename) {
+  return /\.(md|markdown)$/i.test(filename);
+}
+
+// Lazily-initialized, per-tab, transient (not persisted) view-mode map. Markdown
+// files default to "preview"; everything else defaults to "diff".
+function getFileViewMode(tab, file) {
+  tab.fileViewModes = tab.fileViewModes || {};
+  if (!(file.filename in tab.fileViewModes)) {
+    tab.fileViewModes[file.filename] = isMarkdownFile(file.filename) ? "preview" : "diff";
+  }
+  return tab.fileViewModes[file.filename];
+}
+
+// marked.parse is the v9+ API; fall back to calling marked() directly for
+// older UMD bundles that export the function itself.
+const mdParse =
+  typeof marked !== "undefined" && marked.parse ? marked.parse.bind(marked) : marked;
+
+// Segments a markdown source into 1-indexed, inclusive line ranges, one per
+// top-level block (heading, fenced code, table, blockquote, list, paragraph).
+// Blank lines are skipped. Every non-blank line ends up in exactly one block,
+// and blocks are returned in source order so line numbers map 1:1 to
+// `source.split("\n")` indices.
+function splitMarkdownLineBlocks(source) {
+  const lines = source.split("\n");
+  const n = lines.length;
+  const blocks = [];
+  let i = 0; // 0-indexed cursor
+
+  const isBlank = (s) => s.trim() === "";
+
+  while (i < n) {
+    const line = lines[i];
+
+    if (isBlank(line)) {
+      i++;
+      continue;
+    }
+
+    // Fenced code block: ```... or ~~~...
+    const fenceMatch = line.match(/^(\s*)(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const fenceChar = fenceMatch[2][0];
+      const fenceLen = fenceMatch[2].length;
+      const start = i;
+      i++;
+      const closeRe = new RegExp(`^\\s*${fenceChar}{${fenceLen},}\\s*$`);
+      while (i < n && !closeRe.test(lines[i])) i++;
+      if (i < n) i++; // consume closing fence line
+      blocks.push({ startLine: start + 1, endLine: i });
+      continue;
+    }
+
+    // ATX heading
+    if (/^#{1,6}\s/.test(line)) {
+      blocks.push({ startLine: i + 1, endLine: i + 1 });
+      i++;
+      continue;
+    }
+
+    // GFM table: current line has a pipe, next line is a separator row.
+    const sepRe = /^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/;
+    if (line.includes("|") && i + 1 < n && sepRe.test(lines[i + 1])) {
+      const start = i;
+      i += 2; // header + separator
+      while (i < n && !isBlank(lines[i]) && lines[i].includes("|")) i++;
+      blocks.push({ startLine: start + 1, endLine: i });
+      continue;
+    }
+
+    // Blockquote
+    if (/^\s*>/.test(line)) {
+      const start = i;
+      i++;
+      while (i < n && !isBlank(lines[i]) && /^\s*>/.test(lines[i])) i++;
+      blocks.push({ startLine: start + 1, endLine: i });
+      continue;
+    }
+
+    // List
+    const listItemRe = /^\s*([-*+]|\d+[.)])\s/;
+    if (listItemRe.test(line)) {
+      const start = i;
+      i++;
+      for (;;) {
+        if (i >= n) break;
+        if (listItemRe.test(lines[i]) || /^\s+\S/.test(lines[i])) {
+          i++;
+          continue;
+        }
+        if (isBlank(lines[i])) {
+          // Loose list: a single blank line followed by another list item or
+          // an indented continuation keeps the block going.
+          const next = lines[i + 1];
+          if (next != null && (listItemRe.test(next) || /^\s+\S/.test(next))) {
+            i++; // consume the blank line, keep scanning
+            continue;
+          }
+          break;
+        }
+        break;
+      }
+      blocks.push({ startLine: start + 1, endLine: i });
+      continue;
+    }
+
+    // Paragraph (fallback): contiguous non-blank lines not matching anything above.
+    {
+      const start = i;
+      i++;
+      while (i < n && !isBlank(lines[i])) i++;
+      blocks.push({ startLine: start + 1, endLine: i });
+    }
+  }
+
+  return blocks;
+}
+
+// Renders a markdown file's content as a series of blocks, with right-side
+// inline comments threaded in and "commentable" blocks clickable to open the
+// composer (reusing the existing inline-comment posting flow).
+function buildPreviewElement(file, tab, content) {
+  const root = document.createElement("div");
+  root.className = "md-preview";
+
+  const commentableRight = new Set();
+  if (file.patch) {
+    for (const row of parsePatch(file.patch)) {
+      if ((row.type === "add" || row.type === "context") && row.newLine) {
+        commentableRight.add(row.newLine);
+      }
+    }
+  }
+
+  const byLine = inlineCommentsByLine(tab, file.filename);
+  const placedRight = new Set();
+  const lines = content.split("\n");
+
+  if (content.trim() === "") {
+    root.innerHTML = `<div class="binary-note">(empty file)</div>`;
+    return root;
+  }
+
+  for (const blk of splitMarkdownLineBlocks(content)) {
+    const slice = lines.slice(blk.startLine - 1, blk.endLine).join("\n");
+    const wrap = document.createElement("div");
+    wrap.className = "md-block";
+    wrap.dataset.startLine = blk.startLine;
+    wrap.dataset.endLine = blk.endLine;
+    wrap.innerHTML = mdParse(slice, { gfm: true, breaks: false });
+
+    let target = null;
+    for (let ln = blk.startLine; ln <= blk.endLine; ln++) {
+      if (commentableRight.has(ln)) { target = ln; break; }
+    }
+    if (target != null) {
+      wrap.classList.add("commentable");
+      wrap.addEventListener("click", (e) => {
+        if (e.target.closest("a")) return;
+        openInlineComposer(wrap, file, { side: "RIGHT", line: target }, tab);
+      });
+    }
+
+    root.appendChild(wrap);
+
+    for (let ln = blk.startLine; ln <= blk.endLine; ln++) {
+      if (byLine.right.has(ln) && !placedRight.has(ln)) {
+        byLine.right.get(ln).forEach((cm) => root.appendChild(renderInlineThread(cm)));
+        placedRight.add(ln);
+      }
+    }
+  }
+
+  const orphanedRight = [...byLine.right.entries()].filter(([line]) => !placedRight.has(line));
+  for (const [, arr] of orphanedRight) {
+    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true })));
+  }
+  // LEFT-side comments target removed lines, which have no home in a preview
+  // of the current file content — show them as orphaned, like outdated threads.
+  for (const arr of byLine.left.values()) {
+    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true })));
+  }
+
+  return root;
+}
+
+// Fetches a file's content at the PR's head SHA for markdown preview.
+function fetchFileContent(tab, filename) {
+  const ref = tab.data.headSha;
+  const url = `/api/pr/file?owner=${encodeURIComponent(tab.owner)}&repo=${encodeURIComponent(tab.repo)}&path=${encodeURIComponent(filename)}&ref=${encodeURIComponent(ref)}`;
+  return fetch(url).then(async (r) => {
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || "Failed to load file");
+    return body.content;
+  });
+}
+
+// Loads (and caches per-tab) a markdown file's content and renders it into
+// `container`. Guards against staleness if the user navigates away or
+// switches back to diff view before the fetch resolves.
+async function renderPreview(file, tab, container) {
+  container.innerHTML = `<div class="preview-loading">Loading preview…</div>`;
+
+  tab.fileContents = tab.fileContents || {};
+  if (!tab.fileContents[file.filename]) {
+    tab.fileContents[file.filename] = fetchFileContent(tab, file.filename);
+  }
+
+  let content;
+  try {
+    content = await tab.fileContents[file.filename];
+  } catch (e) {
+    if (tab.selected !== file.filename || getFileViewMode(tab, file) !== "preview") return;
+    if (!container.isConnected) return;
+    delete tab.fileContents[file.filename];
+    container.innerHTML = "";
+    const note = document.createElement("div");
+    note.className = "binary-note";
+    note.textContent = `Failed to load preview: ${e.message}`;
+    const btn = document.createElement("button");
+    btn.className = "btn ghost";
+    btn.type = "button";
+    btn.textContent = "Show diff";
+    btn.addEventListener("click", () => {
+      tab.fileViewModes[file.filename] = "diff";
+      renderMain(tab);
+    });
+    container.appendChild(note);
+    container.appendChild(btn);
+    return;
+  }
+
+  if (tab.selected !== file.filename || getFileViewMode(tab, file) !== "preview") return;
+  if (!container.isConnected) return;
+
+  container.innerHTML = "";
+  container.appendChild(buildPreviewElement(file, tab, content));
 }
 
 // Builds the rendered diff (rows + any inline comment threads) for one file.
