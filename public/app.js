@@ -156,11 +156,38 @@ function renderModeChip() {
     (info.disallowed.length ? ` (disallowed: ${info.disallowed.join(", ")})` : "");
 }
 
+// ---------- Split-pane helpers ----------
+// A tab can show two files side by side: tab.selected (primary/left pane) and
+// tab.selectedSecondary (right pane, a filename or null). tab.activePane
+// ("primary" | "secondary") is which pane keyboard nav and sidebar clicks act on.
+
+// Is this file currently displayed in either pane of this tab?
+function fileIsVisible(tab, filename) {
+  return filename === tab.selected || filename === tab.selectedSecondary;
+}
+
+// The DOM element of the currently active pane's scroll container. In split
+// mode this is the .diff-pane.active element; otherwise it's #fileMain itself.
+function activePaneEl() {
+  return document.querySelector("#fileMain .diff-pane.active") || $("fileMain");
+}
+
+// Point the active pane at `filename`. Primary pane can also hold OVERVIEW;
+// the secondary pane only ever holds a real filename.
+function setActivePaneSelection(tab, filename) {
+  if (tab.activePane === "secondary") {
+    tab.selectedSecondary = filename;
+  } else {
+    tab.selected = filename;
+  }
+}
+
 // ---------- Keyboard navigation ----------
 let currentRowIndex = -1;
 
 function getDiffRows() {
-  return [...document.querySelectorAll("#fileMain .diff-row")];
+  // Scope to the active pane so j/k navigate only the focused side in split view.
+  return [...activePaneEl().querySelectorAll(".diff-row")];
 }
 
 function getFileRows() {
@@ -186,10 +213,13 @@ function moveFile(delta) {
   const fileRows = getFileRows();
   if (!fileRows.length) return;
   const filenames = fileRows.map((r) => r.dataset.view);
-  let i = filenames.indexOf(tab.selected);
+  // Step from whatever file the ACTIVE pane currently shows.
+  const current =
+    tab.activePane === "secondary" ? tab.selectedSecondary : tab.selected;
+  let i = filenames.indexOf(current);
   if (i < 0) i = 0;
   else i = (i + delta + filenames.length) % filenames.length;
-  tab.selected = filenames[i];
+  setActivePaneSelection(tab, filenames[i]);
   currentRowIndex = -1;
   renderSidebar(tab);
   renderMain(tab);
@@ -449,6 +479,7 @@ function renderReview() {
   // PR description/overview, like GitHub's Conversation tab.
   if (!tab.selected) tab.selected = OVERVIEW;
   if (!tab.sidebarView) tab.sidebarView = "files";
+  if (tab.activePane !== "secondary") tab.activePane = "primary";
 
   renderSidebar(tab);
   renderMain(tab);
@@ -488,7 +519,7 @@ function renderChunksView(tab) {
     const fileRows = chunk.files
       .map(
         (fn) => `
-      <div class="tree-row tree-file chunk-file${tab.selected === fn ? " active" : ""}" data-view="${esc(fn)}" title="${esc(fn)}">
+      <div class="tree-row tree-file chunk-file${fileIsVisible(tab, fn) ? " active" : ""}" data-view="${esc(fn)}" title="${esc(fn)}">
         <span class="tree-label">${esc(fn.split("/").pop())}</span>
       </div>`
       )
@@ -655,8 +686,20 @@ function renderSidebar(tab) {
 
   // File / overview rows select; folder rows toggle their collapsed state.
   el.querySelectorAll("[data-view]").forEach((item) => {
-    item.addEventListener("click", () => {
-      tab.selected = item.dataset.view;
+    item.addEventListener("click", (e) => {
+      const view = item.dataset.view;
+      if ((e.metaKey || e.ctrlKey) && view !== OVERVIEW) {
+        // Modifier-click opens the file in the secondary (right) pane.
+        tab.selectedSecondary = view;
+        tab.activePane = "secondary";
+      } else if (view === OVERVIEW) {
+        // The overview/description only ever lives in the primary pane.
+        tab.selected = OVERVIEW;
+        tab.activePane = "primary";
+      } else {
+        // Plain click replaces whichever pane is currently active.
+        setActivePaneSelection(tab, view);
+      }
       currentRowIndex = -1;
       renderSidebar(tab);
       renderMain(tab);
@@ -724,7 +767,7 @@ function renderTreeNodes(node, tab, prefix, depth) {
     const count =
       [...byLine.right.values()].reduce((n, arr) => n + arr.length, 0) +
       [...byLine.left.values()].reduce((n, arr) => n + arr.length, 0);
-    const active = tab.selected === file.filename ? " active" : "";
+    const active = fileIsVisible(tab, file.filename) ? " active" : "";
     const base = file.filename.split("/").pop();
     html += `
       <div class="tree-row tree-file${active}" data-view="${esc(file.filename)}" title="${esc(file.filename)}" style="--depth:${depth}">
@@ -743,6 +786,65 @@ function renderTreeNodes(node, tab, prefix, depth) {
 // Right pane: either the PR description + conversation, or a single file diff.
 function renderMain(tab) {
   const el = $("fileMain");
+
+  // Drop a stale secondary selection that no longer maps to a changed file.
+  if (tab.selectedSecondary &&
+      !tab.data.files.find((f) => f.filename === tab.selectedSecondary)) {
+    tab.selectedSecondary = null;
+  }
+
+  // Single-pane mode: unchanged legacy behavior. #fileMain holds the content
+  // directly and is the scroll container, so existing scroll logic still works.
+  if (!tab.selectedSecondary) {
+    el.classList.remove("split");
+    if (tab.activePane === "secondary") tab.activePane = "primary";
+    renderPrimaryInto(tab, el);
+    return;
+  }
+
+  // Split mode: two independently-scrolling panes inside #fileMain.
+  const secondaryFile = tab.data.files.find(
+    (f) => f.filename === tab.selectedSecondary
+  );
+  el.classList.add("split");
+  el.innerHTML = "";
+
+  const primary = document.createElement("div");
+  primary.className = "diff-pane";
+  renderPrimaryInto(tab, primary);
+
+  const secondary = document.createElement("div");
+  secondary.className = "diff-pane";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "pane-close";
+  close.title = "Close split";
+  close.textContent = "✕";
+  close.addEventListener("click", (e) => {
+    e.stopPropagation();
+    tab.selectedSecondary = null;
+    tab.activePane = "primary";
+    renderMain(tab);
+  });
+  secondary.appendChild(close);
+  secondary.appendChild(renderFileDiff(secondaryFile, tab));
+
+  const panes = { primary, secondary };
+  primary.classList.toggle("active", tab.activePane !== "secondary");
+  secondary.classList.toggle("active", tab.activePane === "secondary");
+  primary.addEventListener("mousedown", () => setActivePane(tab, "primary", panes));
+  secondary.addEventListener("mousedown", (e) => {
+    if (e.target.closest(".pane-close")) return;
+    setActivePane(tab, "secondary", panes);
+  });
+
+  el.appendChild(primary);
+  el.appendChild(secondary);
+}
+
+// Fill `el` with the primary-pane content: the overview, or the tab.selected
+// file diff. Mirrors the original single-pane renderMain body.
+function renderPrimaryInto(tab, el) {
   if (tab.selected === OVERVIEW) {
     renderOverview(tab, el);
     return;
@@ -752,10 +854,19 @@ function renderMain(tab) {
     // Selection no longer resolves (shouldn't happen) — fall back to overview.
     tab.selected = OVERVIEW;
     renderSidebar(tab);
-    return renderMain(tab);
+    return renderPrimaryInto(tab, el);
   }
   el.innerHTML = "";
   el.appendChild(renderFileDiff(file, tab));
+}
+
+// Mark `which` pane active by toggling the .active class only (no re-render, so
+// an in-flight click that opens a comment composer in this pane survives).
+function setActivePane(tab, which, panes) {
+  if (tab.activePane === which) return;
+  tab.activePane = which;
+  panes.primary.classList.toggle("active", which === "primary");
+  panes.secondary.classList.toggle("active", which === "secondary");
 }
 
 function renderOverview(tab, el) {
@@ -1065,7 +1176,7 @@ async function renderPreview(file, tab, container) {
   try {
     content = await tab.fileContents[file.filename];
   } catch (e) {
-    if (tab.selected !== file.filename || getFileViewMode(tab, file) !== "preview") return;
+    if (!fileIsVisible(tab, file.filename) || getFileViewMode(tab, file) !== "preview") return;
     if (!container.isConnected) return;
     delete tab.fileContents[file.filename];
     container.innerHTML = "";
@@ -1085,7 +1196,7 @@ async function renderPreview(file, tab, container) {
     return;
   }
 
-  if (tab.selected !== file.filename || getFileViewMode(tab, file) !== "preview") return;
+  if (!fileIsVisible(tab, file.filename) || getFileViewMode(tab, file) !== "preview") return;
   if (!container.isConnected) return;
 
   container.innerHTML = "";
@@ -1312,7 +1423,7 @@ async function renderNotebookPreview(file, tab, container) {
   try {
     content = await tab.fileContents[file.filename];
   } catch (e) {
-    if (tab.selected !== file.filename || getFileViewMode(tab, file) !== "preview") return;
+    if (!fileIsVisible(tab, file.filename) || getFileViewMode(tab, file) !== "preview") return;
     if (!container.isConnected) return;
     delete tab.fileContents[file.filename];
     container.innerHTML = "";
@@ -1332,7 +1443,7 @@ async function renderNotebookPreview(file, tab, container) {
     return;
   }
 
-  if (tab.selected !== file.filename || getFileViewMode(tab, file) !== "preview") return;
+  if (!fileIsVisible(tab, file.filename) || getFileViewMode(tab, file) !== "preview") return;
   if (!container.isConnected) return;
 
   container.innerHTML = "";
