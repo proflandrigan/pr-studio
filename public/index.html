@@ -26,7 +26,10 @@
         />
         <button class="btn" type="submit">Open</button>
       </form>
-      <div class="status" id="status" title="Connection status"></div>
+      <div class="status-wrap">
+        <button class="status" id="status" type="button" title="Connection status" aria-label="Setup status"></button>
+        <div class="status-popover" id="statusPopover" hidden></div>
+      </div>
     </header>
 
     <nav class="tabs" id="tabs"></nav>
@@ -44,6 +47,7 @@
       <div class="console-head">
         <span class="console-glyph">◗</span>
         <span class="console-label">Claude Code</span>
+        <span class="mode-chip" id="modeChip"></span>
         <div class="console-controls">
           <label class="mode" title="review = read-only · fix = allows edits">
             <select id="agentMode">
