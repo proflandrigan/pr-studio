@@ -7,6 +7,7 @@ const state = {
   active: null,
   repoPaths: {}, // key -> local path
   agentMode: "review",
+  showResolved: false, // view toggle: include resolved inline threads in the diff
 };
 
 function keyOf(o, r, n) {
@@ -19,6 +20,7 @@ function persist() {
     active: state.active,
     repoPaths: state.repoPaths,
     agentMode: state.agentMode,
+    showResolved: state.showResolved,
   };
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(slim));
@@ -64,6 +66,7 @@ async function init() {
   if (saved) {
     state.repoPaths = saved.repoPaths || {};
     state.agentMode = saved.agentMode || "review";
+    state.showResolved = Boolean(saved.showResolved);
     agentModeEl.value = state.agentMode;
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
@@ -245,9 +248,19 @@ function renderReview() {
         <span class="diffstat"><span class="plus">+${pr.additions ?? 0}</span> <span class="minus">−${pr.deletions ?? 0}</span> · ${pr.changedFiles ?? pr.files.length} files</span>
       </div>
     </div>
+    ${renderReviewControls(tab)}
     <div id="files"></div>
     <div class="convo" id="convo"></div>
   `;
+
+  const resolvedToggle = $("showResolvedToggle");
+  if (resolvedToggle) {
+    resolvedToggle.addEventListener("change", () => {
+      state.showResolved = resolvedToggle.checked;
+      persist();
+      renderReview();
+    });
+  }
 
   // Which files are expanded is transient UI state kept on the in-memory tab so
   // it survives re-renders (e.g. after posting a comment). Default: first file.
@@ -308,11 +321,39 @@ function renderFile(file, idx, tab) {
   return el;
 }
 
+// A small toolbar above the diff summarising resolved/outdated inline threads
+// and a toggle to reveal resolved ones (hidden by default, like GitHub).
+function renderReviewControls(tab) {
+  const inline = (tab.comments && tab.comments.inline) || [];
+  const resolved = inline.filter((c) => c.resolved).length;
+  const outdated = inline.filter((c) => c.outdated).length;
+  if (!resolved && !outdated) return "";
+
+  const parts = [];
+  if (resolved) {
+    parts.push(`
+      <label class="review-toggle">
+        <input type="checkbox" id="showResolvedToggle" ${state.showResolved ? "checked" : ""} />
+        Show resolved (${resolved})
+      </label>`);
+  }
+  if (outdated) {
+    parts.push(`<span class="review-stat">${outdated} outdated</span>`);
+  }
+  return `<div class="review-controls">${parts.join("")}</div>`;
+}
+
+// Inline threads visible under the current view filter. Resolved threads are
+// hidden unless the user opts in; outdated threads are always shown (marked).
+function visibleInline(tab) {
+  const inline = (tab.comments && tab.comments.inline) || [];
+  return state.showResolved ? inline : inline.filter((c) => !c.resolved);
+}
+
 // Map of newLine -> [comment, ...] for inline comments on this file.
 function inlineCommentsByLine(tab, filename) {
   const map = new Map();
-  const inline = (tab.comments && tab.comments.inline) || [];
-  for (const cm of inline) {
+  for (const cm of visibleInline(tab)) {
     if (cm.path !== filename) continue;
     const line = cm.line;
     if (!map.has(line)) map.set(line, []);
@@ -323,10 +364,21 @@ function inlineCommentsByLine(tab, filename) {
 
 function renderInlineThread(cm, opts = {}) {
   const el = document.createElement("div");
-  el.className = "inline-comment" + (opts.orphaned ? " orphaned" : "");
-  const where = opts.orphaned ? `<small>${esc(cm.path)}:${cm.line ?? "?"} (outdated)</small>` : "";
+  const classes = ["inline-comment"];
+  if (opts.orphaned) classes.push("orphaned");
+  if (cm.outdated) classes.push("outdated");
+  if (cm.resolved) classes.push("resolved");
+  el.className = classes.join(" ");
+
+  const badges =
+    (cm.outdated ? `<span class="cm-badge outdated">outdated</span>` : "") +
+    (cm.resolved ? `<span class="cm-badge resolved">resolved</span>` : "");
+  // For orphaned threads (anchor not in the shown diff) note where it lived.
+  const where = opts.orphaned
+    ? `<small>${esc(cm.path)}:${cm.originalLine ?? cm.line ?? "?"}</small>`
+    : "";
   el.innerHTML = `
-    <div class="comment-head">@${esc(cm.author)}${where}</div>
+    <div class="comment-head">@${esc(cm.author)}${badges}${where}</div>
     <div class="comment-body">${esc(cm.body)}</div>`;
   return el;
 }
