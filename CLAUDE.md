@@ -27,8 +27,10 @@ run directly, so it can be imported by a test without binding the port.
 Read from `.env` (loaded via Node's built-in `process.loadEnvFile`, no dotenv dep)
 or the real environment:
 
-- `GITHUB_TOKEN` — PAT (fine-grained needs Pull requests: read & write). Absent =
-  public PRs, read-only, no comment posting.
+- `GITHUB_TOKEN` — PAT (fine-grained needs Pull requests: read & write). If unset,
+  `resolveToken()` in `github.js` falls back to the `gh` CLI login (`gh auth token`,
+  or the `oauth_token` in gh's `hosts.yml` for older `gh`). Absent both = public PRs,
+  read-only, no comment posting.
 - `DEFAULT_REPO_PATH` — fallback local checkout the agent runs in when the UI has
   no per-PR path set.
 - `PORT` — default 4317.

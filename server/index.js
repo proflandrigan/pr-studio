@@ -15,6 +15,7 @@ import {
   getComments,
   postConversationComment,
   postInlineComment,
+  hasToken,
 } from "./github.js";
 import { runAgent } from "./agent.js";
 
@@ -37,7 +38,7 @@ function wrap(handler) {
 
 app.get("/api/health", (req, res) => {
   res.json({
-    githubToken: Boolean(process.env.GITHUB_TOKEN),
+    githubToken: hasToken(),
     defaultRepoPath: process.env.DEFAULT_REPO_PATH || null,
   });
 });
@@ -106,8 +107,8 @@ export { app };
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   app.listen(PORT, () => {
     console.log(`\n  PR Studio running → http://localhost:${PORT}\n`);
-    if (!process.env.GITHUB_TOKEN) {
-      console.log("  ⚠  No GITHUB_TOKEN set — you can browse public PRs but can't post comments.");
+    if (!hasToken()) {
+      console.log("  ⚠  No GitHub token (GITHUB_TOKEN or `gh auth login`) — browse public PRs only, can't post comments.");
     }
     console.log("");
   });
