@@ -1479,3 +1479,22 @@ body {
 .chunk-section.reviewed .chunk-body {
   display: none;
 }
+
+/* ---------- Syntax highlighting ---------- */
+/* highlight.js's atom-one-dark theme (loaded before this file) is used only for
+   its token colors. Neutralize the .hljs CONTAINER styling so our own diff /
+   notebook / markdown backgrounds and spacing win, and base (non-token) code text
+   uses the app's text color instead of the theme's grey. */
+.hljs {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+/* Soften comments to match the app's muted tone (atom-one-dark's is close, but
+   align it to the palette for consistency across surfaces). */
+.hljs-comment,
+.hljs-quote {
+  color: var(--muted-dim);
+  font-style: italic;
+}

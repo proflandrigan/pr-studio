@@ -823,6 +823,25 @@ function getFileViewMode(tab, file) {
   return tab.fileViewModes[file.filename];
 }
 
+// Highlight fenced code blocks with highlight.js. marked v18 passes the code
+// renderer a token { text, lang }; `lang` is the fence info-string (a language
+// name like "python"/"py"/"sql"), which hljs resolves directly (aliases included).
+if (typeof marked !== "undefined" && marked.use) {
+  marked.use({
+    renderer: {
+      code({ text, lang }) {
+        const name = (lang || "").trim().toLowerCase();
+        const lines = highlightToLines(text, name);
+        if (lines) {
+          return `<pre><code class="hljs language-${esc(name)}">${lines.join("\n")}</code></pre>`;
+        }
+        const cls = name ? ` class="language-${esc(name)}"` : "";
+        return `<pre><code${cls}>${esc(text)}</code></pre>`;
+      },
+    },
+  });
+}
+
 // marked.parse is the v9+ API; fall back to calling marked() directly for
 // older UMD bundles that export the function itself.
 const mdParse =
@@ -1145,6 +1164,15 @@ function buildNotebookElement(file, tab, content) {
   const root = document.createElement("div");
   root.className = "nb-preview";
 
+  // Notebook code cells share one language; read it from notebook metadata,
+  // defaulting to python (the most common kernel).
+  const nbLang = String(
+    (nb.metadata && (
+      (nb.metadata.language_info && nb.metadata.language_info.name) ||
+      (nb.metadata.kernelspec && nb.metadata.kernelspec.language)
+    )) || "python"
+  ).toLowerCase();
+
   const commentableRight = new Set();
   if (file.patch) {
     for (const row of parsePatch(file.patch)) {
@@ -1178,7 +1206,9 @@ function buildNotebookElement(file, tab, content) {
 
       const pre = document.createElement("pre");
       pre.className = "nb-source";
-      pre.innerHTML = `<code>${esc(joinSource(cell.source))}</code>`;
+      const codeSrc = joinSource(cell.source);
+      const hl = highlightToLines(codeSrc, nbLang);
+      pre.innerHTML = hl ? `<code class="hljs">${hl.join("\n")}</code>` : `<code>${esc(codeSrc)}</code>`;
       cellEl.appendChild(pre);
 
       cellEl.appendChild(renderNotebookOutputs(cell.outputs || []));
@@ -1290,7 +1320,32 @@ function buildDiffElement(file, tab) {
   const byLine = inlineCommentsByLine(tab, file.filename);
   const placedRight = new Set();
   const placedLeft = new Set();
-  for (const row of parsePatch(file.patch)) {
+  const rows = parsePatch(file.patch);
+  const lang = hlLanguageFor(file.filename);
+
+  // RIGHT (new file) view = context + added lines, in patch order.
+  // LEFT (old file) view  = context + removed lines, in patch order.
+  const rightText = rows.filter(r => r.type === "add" || r.type === "context").map(r => r.text).join("\n");
+  const leftText  = rows.filter(r => r.type === "del" || r.type === "context").map(r => r.text).join("\n");
+  const rightHL = highlightToLines(rightText, lang); // null if lang unknown / hljs missing
+  const leftHL  = highlightToLines(leftText, lang);
+
+  let rIdx = 0, lIdx = 0;
+  for (const row of rows) {
+    if (row.type === "context") {
+      if (rightHL) row.html = rightHL[rIdx];
+      rIdx++; lIdx++;
+    } else if (row.type === "add") {
+      if (rightHL) row.html = rightHL[rIdx];
+      rIdx++;
+    } else if (row.type === "del") {
+      if (leftHL) row.html = leftHL[lIdx];
+      lIdx++;
+    }
+    // hunk rows: no html
+  }
+
+  for (const row of rows) {
     diff.appendChild(renderDiffRow(row, file, tab));
     if (row.type === "del") {
       if (row.oldLine && byLine.left.has(row.oldLine)) {
@@ -1387,7 +1442,8 @@ function renderDiffRow(row, file, tab) {
   const canComment = row.type === "add" || row.type === "context" || row.type === "del";
   if (canComment) el.classList.add("commentable");
 
-  el.innerHTML = `<span class="ln">${row.newLine ?? ""}</span><span class="code">${esc(row.text)}</span>`;
+  const codeHtml = row.html != null ? row.html : esc(row.text);
+  el.innerHTML = `<span class="ln">${row.newLine ?? ""}</span><span class="code">${codeHtml}</span>`;
 
   const target =
     row.type === "del" ? { side: "LEFT", line: row.oldLine } : { side: "RIGHT", line: row.newLine };
@@ -1610,6 +1666,111 @@ function parsePatch(patch) {
 }
 
 // ---------- Utils ----------
+// Maps a filename to a highlight.js language id by extension, or null when the
+// type is unknown / not worth highlighting. Used so the diff and preview views
+// can highlight per the file's real language instead of relying on autodetect.
+function hlLanguageFor(filename) {
+  const name = String(filename == null ? "" : filename);
+  const dotIdx = name.lastIndexOf(".");
+  if (dotIdx === -1) return null;
+  const ext = name.slice(dotIdx + 1).toLowerCase();
+  const EXT_TO_LANG = {
+    py: "python",
+    pyw: "python",
+    ipynb: "python",
+    js: "javascript",
+    mjs: "javascript",
+    cjs: "javascript",
+    jsx: "javascript",
+    ts: "typescript",
+    tsx: "typescript",
+    sql: "sql",
+    json: "json",
+    yml: "yaml",
+    yaml: "yaml",
+    md: "markdown",
+    markdown: "markdown",
+    sh: "bash",
+    bash: "bash",
+    zsh: "bash",
+    rb: "ruby",
+    go: "go",
+    rs: "rust",
+    java: "java",
+    kt: "kotlin",
+    kts: "kotlin",
+    php: "php",
+    swift: "swift",
+    c: "c",
+    h: "c",
+    cpp: "cpp",
+    cc: "cpp",
+    cxx: "cpp",
+    hpp: "cpp",
+    cs: "csharp",
+    css: "css",
+    scss: "scss",
+    less: "less",
+    html: "xml",
+    htm: "xml",
+    xml: "xml",
+    toml: "ini",
+    ini: "ini",
+    cfg: "ini",
+    diff: "diff",
+    patch: "diff",
+    lua: "lua",
+    r: "r",
+    pl: "perl",
+  };
+  const langId = EXT_TO_LANG[ext];
+  if (!langId) return null;
+  if (typeof hljs === "undefined" || !hljs.getLanguage(langId)) return null;
+  return langId;
+}
+
+// Highlights `text` as `lang` and returns an ARRAY of HTML strings — one entry
+// per input line (text.split("\n")). Any <span> still open at a line boundary is
+// closed at end-of-line and reopened at the start of the next line, so multi-line
+// constructs (block comments, triple-quoted strings) color correctly even though
+// each line is rendered in its own DOM row. Returns null when highlighting isn't
+// possible (no lang, hljs unavailable, or lang not registered) so callers can
+// fall back to esc().
+function highlightToLines(text, lang) {
+  if (!lang || typeof hljs === "undefined" || !hljs.getLanguage(lang)) return null;
+
+  const html = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+
+  const tokenRe = /(<span[^>]*>)|(<\/span>)|([^<]+)/g;
+  const stack = [];
+  const lines = [];
+  let current = "";
+  let match;
+
+  while ((match = tokenRe.exec(html)) !== null) {
+    const [, openTag, closeTag, text] = match;
+    if (openTag) {
+      stack.push(openTag);
+      current += openTag;
+    } else if (closeTag) {
+      stack.pop();
+      current += "</span>";
+    } else if (text) {
+      const segments = text.split("\n");
+      for (let i = 0; i < segments.length - 1; i++) {
+        current += segments[i];
+        current += "</span>".repeat(stack.length);
+        lines.push(current);
+        current = stack.join("");
+      }
+      current += segments[segments.length - 1];
+    }
+  }
+
+  lines.push(current);
+  return lines;
+}
+
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;")
