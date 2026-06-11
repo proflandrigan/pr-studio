@@ -45,6 +45,9 @@ const consoleEl = $("console");
 const consoleOut = $("consoleOut");
 const repoPathEl = $("repoPath");
 const agentModeEl = $("agentMode");
+const modeChipEl = $("modeChip");
+
+let modeInfo = null;
 
 // ---------- Boot ----------
 init();
@@ -53,14 +56,19 @@ async function init() {
   // health
   try {
     const h = await fetch("/api/health").then((r) => r.json());
-    statusEl.classList.add(h.githubToken ? "ok" : "warn");
-    statusEl.title = h.githubToken
-      ? "GitHub token detected — comments enabled"
-      : "No GitHub token — read-only for public PRs, can't post comments";
+    renderStatus(h);
     if (h.defaultRepoPath) repoPathEl.value = h.defaultRepoPath;
   } catch {
+    statusEl.classList.add("error");
     statusEl.title = "Server unreachable";
   }
+
+  try {
+    modeInfo = await fetch("/api/agent/modes").then((r) => r.json());
+  } catch {
+    modeInfo = null;
+  }
+  renderModeChip();
 
   const saved = loadPersisted();
   if (saved) {
@@ -68,6 +76,7 @@ async function init() {
     state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
     agentModeEl.value = state.agentMode;
+    renderModeChip();
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
     }
@@ -80,6 +89,124 @@ async function init() {
 
   wireEvents();
 }
+
+function renderStatus(h) {
+  statusEl.classList.remove("ok", "warn", "error");
+  const overall = h.githubToken && h.claudeAvailable ? "ok" : !h.githubToken && !h.claudeAvailable ? "error" : "warn";
+  statusEl.classList.add(overall);
+  statusEl.title = "Setup status — click for details";
+
+  const tokenLabel = {
+    env: "GITHUB_TOKEN environment variable",
+    "gh-cli": "gh CLI login (gh auth token)",
+    "gh-config": "gh CLI login (hosts.yml)",
+  }[h.tokenSource] || "none found";
+  const tokenNote = h.githubToken
+    ? "Read/write — comments can be posted."
+    : "Read-only — public PRs only, can't post comments.";
+
+  const claudeNote = h.claudeAvailable
+    ? "Found on PATH — agent console is usable."
+    : "Not found on PATH — agent console will fail to launch. Set CLAUDE_BIN or install Claude Code.";
+
+  const popover = $("statusPopover");
+  popover.innerHTML = `
+    <div class="status-row">
+      <div class="status-row-label">GitHub auth</div>
+      <div class="status-row-value ${h.githubToken ? "ok" : "warn"}">${h.githubToken ? "Token found" : "No token"} — ${esc(tokenLabel)}</div>
+      <div class="status-row-note">${tokenNote}</div>
+    </div>
+    <div class="status-row">
+      <div class="status-row-label">Claude Code agent</div>
+      <div class="status-row-value ${h.claudeAvailable ? "ok" : "warn"}">${h.claudeAvailable ? "Available" : "Not found"}</div>
+      <div class="status-row-note">${claudeNote}</div>
+    </div>
+    <div class="status-row">
+      <div class="status-row-label">Default repo path</div>
+      <div class="status-row-value ${h.defaultRepoPath ? "ok" : "warn"}">${h.defaultRepoPath ? esc(h.defaultRepoPath) : "Not set"}</div>
+      <div class="status-row-note">${h.defaultRepoPath ? "Used when a PR tab has no path of its own." : "Set DEFAULT_REPO_PATH or fill in the repo path field per tab."}</div>
+    </div>
+  `;
+}
+
+function renderModeChip() {
+  if (!modeChipEl) return;
+  const mode = agentModeEl.value || state.agentMode || "review";
+  const info = modeInfo && modeInfo[mode];
+  modeChipEl.classList.remove("readonly", "edit");
+  if (!info) {
+    modeChipEl.textContent = "";
+    return;
+  }
+  modeChipEl.classList.add(mode === "fix" ? "edit" : "readonly");
+  const tools = info.allowed.join(", ");
+  modeChipEl.textContent = `${info.description} — ${tools}`;
+  modeChipEl.title =
+    info.description +
+    (info.disallowed.length ? ` (disallowed: ${info.disallowed.join(", ")})` : "");
+}
+
+// ---------- Keyboard navigation ----------
+let currentRowIndex = -1;
+
+function getDiffRows() {
+  return [...document.querySelectorAll("#fileMain .diff-row")];
+}
+
+function getFileRows() {
+  return [...document.querySelectorAll("#fileSidebar .tree-file")];
+}
+
+function setCurrentRow(index) {
+  const rows = getDiffRows();
+  rows.forEach((r) => r.classList.remove("current"));
+  if (!rows.length) {
+    currentRowIndex = -1;
+    return;
+  }
+  currentRowIndex = Math.max(0, Math.min(index, rows.length - 1));
+  const row = rows[currentRowIndex];
+  row.classList.add("current");
+  row.scrollIntoView({ block: "nearest" });
+}
+
+function moveFile(delta) {
+  const tab = state.tabs.find((t) => t.key === state.active);
+  if (!tab) return;
+  const fileRows = getFileRows();
+  if (!fileRows.length) return;
+  const filenames = fileRows.map((r) => r.dataset.view);
+  let i = filenames.indexOf(tab.selected);
+  if (i < 0) i = 0;
+  else i = (i + delta + filenames.length) % filenames.length;
+  tab.selected = filenames[i];
+  currentRowIndex = -1;
+  renderSidebar(tab);
+  renderMain(tab);
+}
+
+document.addEventListener("keydown", (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if (document.querySelector(".inline-composer")) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  if (e.key === "j" || e.key === "k") {
+    e.preventDefault();
+    if (currentRowIndex < 0) setCurrentRow(0);
+    else setCurrentRow(currentRowIndex + (e.key === "j" ? 1 : -1));
+  } else if (e.key === "n" || e.key === "p") {
+    e.preventDefault();
+    moveFile(e.key === "n" ? 1 : -1);
+  } else if (e.key === "Enter") {
+    if (currentRowIndex < 0) return;
+    const rows = getDiffRows();
+    const rowEl = rows[currentRowIndex];
+    if (!rowEl || !rowEl.classList.contains("commentable")) return;
+    e.preventDefault();
+    rowEl.click();
+  }
+});
 
 function wireEvents() {
   $("openForm").addEventListener("submit", (e) => {
@@ -108,6 +235,7 @@ function wireEvents() {
 
   agentModeEl.addEventListener("change", () => {
     state.agentMode = agentModeEl.value;
+    renderModeChip();
     persist();
   });
 
@@ -116,6 +244,13 @@ function wireEvents() {
       state.repoPaths[state.active] = repoPathEl.value.trim();
       persist();
     }
+  });
+
+  statusEl.addEventListener("click", () => {
+    $("statusPopover").hidden = !$("statusPopover").hidden;
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".status-wrap")) $("statusPopover").hidden = true;
   });
 }
 
@@ -281,7 +416,10 @@ function renderSidebar(tab) {
       <span class="sidebar-icon">📝</span>
       <span class="sidebar-label">Description &amp; conversation</span>
     </div>
-    <div class="sidebar-files-head">${pr.files.length} ${pr.files.length === 1 ? "file" : "files"} changed</div>
+    <div class="sidebar-files-head">
+      ${pr.files.length} ${pr.files.length === 1 ? "file" : "files"} changed
+      <span class="kbd-help" title="Keyboard shortcuts:&#10;j / k — move highlight down/up in the diff&#10;n / p — next/previous file&#10;Enter — comment on highlighted row">?</span>
+    </div>
     ${renderReviewControls(tab)}
     <div class="file-tree">${renderTreeNodes(tree, tab, "", 0)}</div>
   `;
@@ -299,6 +437,7 @@ function renderSidebar(tab) {
   el.querySelectorAll("[data-view]").forEach((item) => {
     item.addEventListener("click", () => {
       tab.selected = item.dataset.view;
+      currentRowIndex = -1;
       renderSidebar(tab);
       renderMain(tab);
     });
@@ -362,7 +501,9 @@ function renderTreeNodes(node, tab, prefix, depth) {
   );
   for (const file of files) {
     const byLine = inlineCommentsByLine(tab, file.filename);
-    const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
+    const count =
+      [...byLine.right.values()].reduce((n, arr) => n + arr.length, 0) +
+      [...byLine.left.values()].reduce((n, arr) => n + arr.length, 0);
     const active = tab.selected === file.filename ? " active" : "";
     const base = file.filename.split("/").pop();
     html += `
@@ -418,7 +559,9 @@ function renderFileDiff(file, tab) {
   el.className = "file open";
 
   const byLine = inlineCommentsByLine(tab, file.filename);
-  const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
+  const count =
+    [...byLine.right.values()].reduce((n, arr) => n + arr.length, 0) +
+    [...byLine.left.values()].reduce((n, arr) => n + arr.length, 0);
 
   const head = document.createElement("div");
   head.className = "file-head static";
@@ -442,20 +585,27 @@ function buildDiffElement(file, tab) {
     return diff;
   }
 
-  // Inline review comments for this file, grouped by the line they target.
+  // Inline review comments for this file, grouped by side and the line they target.
   const byLine = inlineCommentsByLine(tab, file.filename);
-  const placed = new Set();
+  const placedRight = new Set();
+  const placedLeft = new Set();
   for (const row of parsePatch(file.patch)) {
     diff.appendChild(renderDiffRow(row, file, tab));
-    if (row.newLine && byLine.has(row.newLine)) {
-      byLine.get(row.newLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
-      placed.add(row.newLine);
+    if (row.type === "del") {
+      if (row.oldLine && byLine.left.has(row.oldLine)) {
+        byLine.left.get(row.oldLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
+        placedLeft.add(row.oldLine);
+      }
+    } else if (row.newLine && byLine.right.has(row.newLine)) {
+      byLine.right.get(row.newLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
+      placedRight.add(row.newLine);
     }
   }
   // Comments whose target line isn't in the visible patch (outdated or out of
   // the shown hunks) still need a home — show them at the end of the file.
-  const orphaned = [...byLine.entries()].filter(([line]) => !placed.has(line));
-  for (const [, arr] of orphaned) {
+  const orphanedRight = [...byLine.right.entries()].filter(([line]) => !placedRight.has(line));
+  const orphanedLeft = [...byLine.left.entries()].filter(([line]) => !placedLeft.has(line));
+  for (const [, arr] of [...orphanedRight, ...orphanedLeft]) {
     arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true })));
   }
   return diff;
@@ -490,16 +640,23 @@ function visibleInline(tab) {
   return state.showResolved ? inline : inline.filter((c) => !c.resolved);
 }
 
-// Map of newLine -> [comment, ...] for inline comments on this file.
+// Returns { right, left } maps of line -> [comment, ...] for inline comments on
+// this file. RIGHT-side comments key on `line`/`newLine` (added/context rows);
+// LEFT-side comments key on `line`/`oldLine` (removed/context rows). Outdated
+// comments have `line: null`, so fall back to `originalLine`/`originalSide`.
 function inlineCommentsByLine(tab, filename) {
-  const map = new Map();
+  const right = new Map();
+  const left = new Map();
   for (const cm of visibleInline(tab)) {
     if (cm.path !== filename) continue;
-    const line = cm.line;
+    const side = cm.line != null ? cm.side : cm.originalSide || cm.side;
+    const line = cm.line ?? cm.originalLine;
+    if (line == null) continue;
+    const map = side === "LEFT" ? left : right;
     if (!map.has(line)) map.set(line, []);
     map.get(line).push(cm);
   }
-  return map;
+  return { right, left };
 }
 
 function renderInlineThread(cm, opts = {}) {
@@ -526,30 +683,33 @@ function renderInlineThread(cm, opts = {}) {
 function renderDiffRow(row, file, tab) {
   const el = document.createElement("div");
   el.className = "diff-row " + row.type;
-  const canComment = row.type === "add" || row.type === "context";
+  const canComment = row.type === "add" || row.type === "context" || row.type === "del";
   if (canComment) el.classList.add("commentable");
 
   el.innerHTML = `<span class="ln">${row.newLine ?? ""}</span><span class="code">${esc(row.text)}</span>`;
 
-  if (canComment && row.newLine) {
-    el.addEventListener("click", () => openInlineComposer(el, file, row, tab));
+  const target =
+    row.type === "del" ? { side: "LEFT", line: row.oldLine } : { side: "RIGHT", line: row.newLine };
+
+  if (canComment && target.line) {
+    el.addEventListener("click", () => openInlineComposer(el, file, target, tab));
   }
   return el;
 }
 
-function openInlineComposer(rowEl, file, row, tab) {
+function openInlineComposer(rowEl, file, target, tab) {
   // one composer at a time
   document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
   const box = document.createElement("div");
   box.className = "inline-composer";
   box.innerHTML = `
-    <textarea placeholder="Comment on ${esc(file.filename)}:${row.newLine} — Cmd/Ctrl+Enter to post"></textarea>
+    <textarea placeholder="Comment on ${esc(file.filename)}:${target.line} — Cmd/Ctrl+Enter to post"></textarea>
     <button class="btn accent" type="button">Post</button>
     <button class="btn ghost" type="button">Cancel</button>
   `;
   const ta = box.querySelector("textarea");
   const [postBtn, cancelBtn] = box.querySelectorAll("button");
-  const post = () => postComment(tab, ta.value, { path: file.filename, line: row.newLine }, box);
+  const post = () => postComment(tab, ta.value, { path: file.filename, line: target.line, side: target.side }, box);
   postBtn.addEventListener("click", post);
   cancelBtn.addEventListener("click", () => box.remove());
   ta.addEventListener("keydown", (e) => {
@@ -615,6 +775,7 @@ async function postComment(tab, body, inline, composerEl) {
   if (inline) {
     payload.path = inline.path;
     payload.line = inline.line;
+    payload.side = inline.side || "RIGHT";
     payload.commitId = tab.data.headSha;
   }
   try {
@@ -701,13 +862,13 @@ function parsePatch(patch) {
     const sign = line[0];
     const text = line.slice(1);
     if (sign === "+") {
-      rows.push({ type: "add", text, newLine: newLine });
+      rows.push({ type: "add", text, newLine: newLine, oldLine: null });
       newLine++;
     } else if (sign === "-") {
       rows.push({ type: "del", text, newLine: null, oldLine });
       oldLine++;
     } else {
-      rows.push({ type: "context", text, newLine: newLine });
+      rows.push({ type: "context", text, newLine: newLine, oldLine: oldLine });
       newLine++;
       oldLine++;
     }

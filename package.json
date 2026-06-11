@@ -4,7 +4,8 @@
   "description": "A stripped-down PR review studio with Claude Code integration",
   "type": "module",
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "test": "node --test server/"
   },
   "engines": {
     "node": ">=18"

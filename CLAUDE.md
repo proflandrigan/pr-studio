@@ -15,12 +15,13 @@ back to the browser.
 ```bash
 npm install        # one dependency: express
 npm start          # node server/index.js → http://localhost:4317
+npm test           # node --test server/ — built-in test runner, no extra deps
 ```
 
-There is no build step, no test runner, and no linter configured. The frontend
-is served as static files; editing `public/*` and reloading the browser is the
-full dev loop. `server/index.js` exports `app` and only calls `app.listen` when
-run directly, so it can be imported by a test without binding the port.
+There is no build step and no linter configured. The frontend is served as
+static files; editing `public/*` and reloading the browser is the full dev loop.
+`server/index.js` exports `app` and only calls `app.listen` when run directly,
+so it's imported directly by `server/index.test.js` without binding the port.
 
 ## Configuration
 
@@ -76,9 +77,3 @@ GitHub's per-file `patch` strings parsed client-side by `parsePatch()`.
 Browser `fetch` → `/api/*` in `index.js` → `github.js` (GitHub data) or
 `agent.js` (spawns `claude`). Diff data is GitHub's per-file patch, so unchanged
 regions far from edits and large/binary files are omitted by design.
-
-## Known gaps
-
-- Inline comments only post on the **RIGHT** side (added/context lines);
-  commenting on removed lines isn't wired up.
-- No automated tests exist despite `index.js` being structured to allow them.

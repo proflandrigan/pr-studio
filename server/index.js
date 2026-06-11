@@ -2,6 +2,7 @@ import process from "node:process";
 import express from "express";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 // Load .env if present (built-in, no dependency). Safe to ignore if missing.
 try {
@@ -16,8 +17,9 @@ import {
   postConversationComment,
   postInlineComment,
   hasToken,
+  tokenSource,
 } from "./github.js";
-import { runAgent } from "./agent.js";
+import { runAgent, MODE_INFO, CLAUDE_BIN } from "./agent.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -36,11 +38,26 @@ function wrap(handler) {
   };
 }
 
+function checkClaudeAvailable() {
+  try {
+    execFileSync(CLAUDE_BIN, ["--version"], { stdio: "ignore", timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 app.get("/api/health", (req, res) => {
   res.json({
     githubToken: hasToken(),
+    tokenSource: tokenSource(),
     defaultRepoPath: process.env.DEFAULT_REPO_PATH || null,
+    claudeAvailable: checkClaudeAvailable(),
   });
+});
+
+app.get("/api/agent/modes", (req, res) => {
+  res.json(MODE_INFO);
 });
 
 app.get(
@@ -64,14 +81,14 @@ app.get(
 app.post(
   "/api/pr/comment",
   wrap(async (req, res) => {
-    const { owner, repo, number, body, path, line, commitId } = req.body;
+    const { owner, repo, number, body, path, line, commitId, side } = req.body;
     if (!body || !body.trim()) {
       res.status(400).json({ error: "Comment body is empty." });
       return;
     }
     let result;
     if (path && line && commitId) {
-      result = await postInlineComment({ owner, repo, number, body, path, line, commitId });
+      result = await postInlineComment({ owner, repo, number, body, path, line, commitId, side: side || "RIGHT" });
     } else {
       result = await postConversationComment({ owner, repo, number, body });
     }

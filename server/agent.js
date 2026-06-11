@@ -6,13 +6,30 @@ import { spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 
 // Which Claude Code binary to call. Override with CLAUDE_BIN if it's not on PATH.
-const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
+export const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 
 // Permission posture for unattended runs. "review" is read-only; "fix" lets the
 // agent edit files. Defaults stay conservative.
 const MODES = {
   review: ["--allowedTools", "Read", "Glob", "Grep", "Bash(git*)", "--disallowedTools", "Write", "Edit"],
   fix: ["--permission-mode", "acceptEdits", "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+};
+
+// Descriptive info for the UI, derived from MODES so there's one source of truth
+// for what each mode can and can't do.
+export const MODE_INFO = {
+  review: {
+    label: "review (read-only)",
+    description: "Read-only — cannot edit files",
+    allowed: ["Read", "Glob", "Grep", "Bash(git*)"],
+    disallowed: ["Write", "Edit"],
+  },
+  fix: {
+    label: "fix (allows edits)",
+    description: "Can edit files + run bash",
+    allowed: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+    disallowed: [],
+  },
 };
 
 export function runAgent({ prompt, repoPath, mode = "review", onData, onError, onClose }) {

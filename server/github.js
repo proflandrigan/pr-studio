@@ -27,10 +27,12 @@ function ghConfigToken() {
 // login (newer gh via `gh auth token`, older gh via its hosts.yml). `null` (not
 // undefined) is cached on failure so we don't re-shell/re-read on every call.
 let cachedToken;
+let cachedTokenSource;
 export function resolveToken() {
   if (cachedToken !== undefined) return cachedToken;
   if (process.env.GITHUB_TOKEN) {
     cachedToken = process.env.GITHUB_TOKEN;
+    cachedTokenSource = "env";
     return cachedToken;
   }
   let token = null;
@@ -39,15 +41,28 @@ export function resolveToken() {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
+    if (token) cachedTokenSource = "gh-cli";
   } catch {
     /* old gh lacks `gh auth token` — fall through to the config file */
   }
-  cachedToken = token || ghConfigToken();
+  if (!token) {
+    token = ghConfigToken();
+    if (token) cachedTokenSource = "gh-config";
+  }
+  cachedToken = token || null;
+  if (!cachedToken) cachedTokenSource = null;
   return cachedToken;
 }
 
 export function hasToken() {
   return Boolean(resolveToken());
+}
+
+// Which source resolveToken() used: "env" | "gh-cli" | "gh-config" | null.
+// Resolves the token first if not already cached.
+export function tokenSource() {
+  resolveToken();
+  return cachedTokenSource ?? null;
 }
 
 function headers() {
@@ -109,7 +124,7 @@ async function gh(path, options = {}) {
 
 // Accepts a full PR URL or "owner/repo#number" and returns its parts.
 export function parsePrRef(input) {
-  if (!input) throw new Error("No PR reference provided");
+  if (!input) throw Object.assign(new Error("No PR reference provided"), { status: 400 });
   const trimmed = input.trim();
 
   // https://github.com/owner/repo/pull/123
@@ -213,6 +228,8 @@ export async function getComments({ owner, repo, number }) {
         // current diff); `original_line` is where the comment was first placed.
         line: c.line,
         originalLine: c.original_line,
+        side: c.side,
+        originalSide: c.original_side,
         resolved: Boolean(st.resolved),
         outdated: Boolean(st.outdated),
         createdAt: c.created_at,
