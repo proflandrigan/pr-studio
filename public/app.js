@@ -267,28 +267,14 @@ function renderReview() {
   renderMain(tab);
 }
 
-// Left panel: a "Description" entry at the top, then the changed-file list.
-// Selecting an entry swaps what the main pane shows.
+// Left panel: a "Description" entry at the top, then a nested folder tree of
+// the changed files. Selecting an entry swaps what the main pane shows.
 function renderSidebar(tab) {
   const pr = tab.data;
   const el = $("fileSidebar");
+  if (!tab.collapsedDirs) tab.collapsedDirs = new Set();
 
-  const fileItems = pr.files
-    .map((file) => {
-      const byLine = inlineCommentsByLine(tab, file.filename);
-      const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
-      const active = tab.selected === file.filename ? " active" : "";
-      return `
-        <div class="sidebar-item file-item${active}" data-view="${esc(file.filename)}" title="${esc(file.filename)}">
-          <span class="file-item-name">${esc(file.filename)}</span>
-          <span class="file-item-meta">
-            <span class="file-status">${file.status}</span>
-            ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
-            <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
-          </span>
-        </div>`;
-    })
-    .join("");
+  const tree = buildFileTree(pr.files);
 
   el.innerHTML = `
     <div class="sidebar-item overview${tab.selected === OVERVIEW ? " active" : ""}" data-view="${OVERVIEW}">
@@ -297,7 +283,7 @@ function renderSidebar(tab) {
     </div>
     <div class="sidebar-files-head">${pr.files.length} ${pr.files.length === 1 ? "file" : "files"} changed</div>
     ${renderReviewControls(tab)}
-    <div class="file-list">${fileItems}</div>
+    <div class="file-tree">${renderTreeNodes(tree, tab, "", 0)}</div>
   `;
 
   const resolvedToggle = $("showResolvedToggle");
@@ -309,13 +295,88 @@ function renderSidebar(tab) {
     });
   }
 
-  el.querySelectorAll(".sidebar-item").forEach((item) => {
+  // File / overview rows select; folder rows toggle their collapsed state.
+  el.querySelectorAll("[data-view]").forEach((item) => {
     item.addEventListener("click", () => {
       tab.selected = item.dataset.view;
       renderSidebar(tab);
       renderMain(tab);
     });
   });
+  el.querySelectorAll("[data-dir]").forEach((item) => {
+    item.addEventListener("click", () => {
+      const dir = item.dataset.dir;
+      if (tab.collapsedDirs.has(dir)) tab.collapsedDirs.delete(dir);
+      else tab.collapsedDirs.add(dir);
+      renderSidebar(tab);
+    });
+  });
+}
+
+// Build a folder tree from flat file paths. Each node has `dirs` (name -> node)
+// and `files` (the file objects living directly in this folder).
+function buildFileTree(files) {
+  const root = { dirs: new Map(), files: [] };
+  for (const file of files) {
+    const parts = file.filename.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { dirs: new Map(), files: [] });
+      node = node.dirs.get(parts[i]);
+    }
+    node.files.push(file);
+  }
+  return root;
+}
+
+// Render a tree node's folders then files as flat rows, indented by depth.
+// `prefix` is the full path to this node (so each folder has a stable id).
+function renderTreeNodes(node, tab, prefix, depth) {
+  let html = "";
+
+  const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
+  for (const name of dirNames) {
+    // Collapse single-child folder chains into one row, like GitHub:
+    // src → components → Foo.js becomes "src/components/Foo.js" only if each
+    // intermediate folder has exactly one child and no files of its own.
+    let child = node.dirs.get(name);
+    let label = name;
+    let path = prefix + name;
+    while (child.files.length === 0 && child.dirs.size === 1) {
+      const [onlyName, onlyChild] = [...child.dirs.entries()][0];
+      label += "/" + onlyName;
+      path += "/" + onlyName;
+      child = onlyChild;
+    }
+    const collapsed = tab.collapsedDirs.has(path);
+    html += `
+      <div class="tree-row tree-dir${collapsed ? " collapsed" : ""}" data-dir="${esc(path)}" style="--depth:${depth}">
+        <span class="tree-chevron">▶</span>
+        <span class="tree-label">${esc(label)}</span>
+      </div>`;
+    if (!collapsed) html += renderTreeNodes(child, tab, path + "/", depth + 1);
+  }
+
+  const files = [...node.files].sort((a, b) =>
+    a.filename.split("/").pop().localeCompare(b.filename.split("/").pop())
+  );
+  for (const file of files) {
+    const byLine = inlineCommentsByLine(tab, file.filename);
+    const count = [...byLine.values()].reduce((n, arr) => n + arr.length, 0);
+    const active = tab.selected === file.filename ? " active" : "";
+    const base = file.filename.split("/").pop();
+    html += `
+      <div class="tree-row tree-file${active}" data-view="${esc(file.filename)}" title="${esc(file.filename)}" style="--depth:${depth}">
+        <span class="tree-label">${esc(base)}</span>
+        <span class="file-item-meta">
+          <span class="file-status">${file.status}</span>
+          ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
+          <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
+        </span>
+      </div>`;
+  }
+
+  return html;
 }
 
 // Right pane: either the PR description + conversation, or a single file diff.

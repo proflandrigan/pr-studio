@@ -378,28 +378,64 @@ body {
   color: var(--muted-dim);
 }
 
-.file-item {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 3px;
+/* ---------- File tree ---------- */
+.file-tree {
+  margin-top: 2px;
 }
 
-.file-item-name {
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* indent grows with nesting depth */
+  padding: 6px 8px 6px calc(10px + var(--depth, 0) * 13px);
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.tree-row:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.tree-file.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.tree-chevron {
+  flex: none;
+  width: 10px;
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 0.12s;
+}
+.tree-dir:not(.collapsed) .tree-chevron {
+  transform: rotate(90deg);
+}
+
+.tree-dir .tree-label {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.tree-label {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
-  text-align: left;
 }
 
 .file-item-meta {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: none;
   font-size: 11px;
-}
-.file-item-meta .file-counts {
-  margin-left: auto;
 }
 
 .pr-title {
