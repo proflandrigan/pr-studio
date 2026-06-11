@@ -26,6 +26,12 @@
           spellcheck="false"
         />
         <button class="btn" type="submit">Open</button>
+        <div class="my-prs-wrap">
+          <button class="btn" id="myPrsBtn" type="button" title="Show open PRs you're involved in">
+            My PRs <span class="my-prs-caret">▾</span>
+          </button>
+          <div class="my-prs-panel" id="myPrsPanel" hidden></div>
+        </div>
       </form>
       <div class="status-wrap">
         <button class="status" id="status" type="button" title="Connection status" aria-label="Setup status"></button>

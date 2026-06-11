@@ -292,6 +292,26 @@ function wireEvents() {
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".status-wrap")) $("statusPopover").hidden = true;
   });
+
+  const myPrsBtn = $("myPrsBtn");
+  const myPrsPanel = $("myPrsPanel");
+  if (healthInfo && !healthInfo.githubToken) {
+    myPrsBtn.disabled = true;
+    myPrsBtn.title =
+      "Set a GitHub token (GITHUB_TOKEN or `gh auth login`) to detect your PRs.";
+  }
+  myPrsBtn.addEventListener("click", () => {
+    if (myPrsBtn.disabled) return;
+    if (!myPrsPanel.hidden) {
+      myPrsPanel.hidden = true;
+      return;
+    }
+    myPrsPanel.hidden = false;
+    loadMyPrs();
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".my-prs-wrap")) myPrsPanel.hidden = true;
+  });
 }
 
 // ---------- Open / fetch PR ----------
@@ -385,6 +405,48 @@ async function loadComments(key) {
   } catch {
     /* comments are best-effort */
   }
+}
+
+// ---------- My PRs dropdown ----------
+// Fetches the authenticated user's open PRs and renders them into the dropdown
+// panel. Selecting one reuses openPr(). Best-effort: failures render inline.
+async function loadMyPrs() {
+  const panel = $("myPrsPanel");
+  panel.innerHTML = `<div class="my-prs-state">Loading…</div>`;
+  try {
+    const res = await fetch("/api/my-prs");
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || "Failed to load your PRs");
+    renderMyPrs(body.prs || []);
+  } catch (e) {
+    panel.innerHTML = `<div class="my-prs-state error">${esc(e.message)}</div>`;
+  }
+}
+
+function renderMyPrs(prs) {
+  const panel = $("myPrsPanel");
+  if (!prs.length) {
+    panel.innerHTML = `<div class="my-prs-state">No open PRs involving you.</div>`;
+    return;
+  }
+  panel.innerHTML = prs
+    .map(
+      (pr) => `
+      <button type="button" class="my-pr-item" data-ref="${esc(pr.owner)}/${esc(pr.repo)}#${pr.number}">
+        <span class="my-pr-item-top">
+          <span class="my-pr-repo">${esc(pr.owner)}/${esc(pr.repo)}#${pr.number}</span>
+          ${pr.draft ? `<span class="my-pr-draft">draft</span>` : ""}
+        </span>
+        <span class="my-pr-title">${esc(pr.title)}</span>
+      </button>`
+    )
+    .join("");
+  panel.querySelectorAll(".my-pr-item").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $("myPrsPanel").hidden = true;
+      openPr(btn.dataset.ref);
+    });
+  });
 }
 
 // ---------- Tabs ----------
