@@ -14,6 +14,7 @@ const state = {
   hideDone: false, // view toggle: hide locally-done comments
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
   pins: {}, // key -> [ { id, file, side, startLine, endLine, code } ]
+  conversations: {}, // key -> { sessionId, started, turns: [ { role, text } ] }
 };
 
 function keyOf(o, r, n) {
@@ -29,6 +30,24 @@ function pinsFor(key) {
   if (!key) return [];
   if (!state.pins[key]) state.pins[key] = [];
   return state.pins[key];
+}
+
+// Conversations live keyed by tab key (owner/repo#number) so each tab can hold
+// its own ongoing Claude Code chat (session id + transcript), persisted across
+// reloads alongside the other keyed maps in state.
+function conversationFor(key) {
+  if (!key) return null;
+  if (!state.conversations[key]) {
+    state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, turns: [] };
+  }
+  return state.conversations[key];
+}
+
+function resetConversation(key) {
+  if (!key) return null;
+  state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, turns: [] };
+  persist();
+  return state.conversations[key];
 }
 
 function addPin(key, pin) {
@@ -70,6 +89,7 @@ function persist() {
     hideDone: state.hideDone,
     breakdowns: state.breakdowns,
     pins: state.pins,
+    conversations: state.conversations,
   };
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(slim));
@@ -135,6 +155,7 @@ async function init() {
     state.autoCheck = saved.autoCheck !== false; // default on
     state.breakdowns = saved.breakdowns || {};
     state.pins = saved.pins || {};
+    state.conversations = saved.conversations || {};
     state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
     state.done = saved.done || {};
@@ -354,6 +375,13 @@ function wireEvents() {
 
   $("clearConsole").addEventListener("click", () => {
     consoleOut.textContent = "";
+  });
+
+  // New chat: reset the active tab's conversation (fresh session id, empty
+  // transcript) so the next message starts a brand-new Claude Code session.
+  $("newChat").addEventListener("click", () => {
+    if (state.active) resetConversation(state.active);
+    renderTranscript(state.active);
   });
 
   // Collapse console by clicking its label area
@@ -632,6 +660,7 @@ function activate(key) {
   renderTabs();
   renderReview();
   renderPins();
+  renderTranscript(key);
   persist();
   refreshCheckCmd();
 }
@@ -2361,27 +2390,56 @@ async function runAgent() {
     persist();
   }
 
-  append(`\n› ${prompt}\n`, "sys");
+  // Per-tab conversation: continue the existing thread if one is already
+  // started, otherwise this turn opens a new Claude Code session. `sessionId`
+  // is the same UUID for the life of the thread; `resume` flips to true once a
+  // turn has completed (the session then exists on disk and can be resumed).
+  const key = state.active;
+  const convo = key ? conversationFor(key) : null;
+  const sessionId = convo ? convo.sessionId : undefined;
+  const resume = convo ? convo.started : false;
+
+  // Record + echo the user's turn — store what they actually typed, not the
+  // pinned-context plumbing that gets prepended for the agent.
+  if (convo) {
+    convo.turns.push({ role: "user", text: prompt });
+    persist();
+  }
+  append(`\n› ${prompt}\n`, "user");
   input.value = "";
   agentActive = true;
   $("agentRun").disabled = true;
 
+  let agentText = "";
   try {
     const res = await fetch("/api/agent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: fullPrompt, repoPath, mode: agentModeEl.value }),
+      body: JSON.stringify({ prompt: fullPrompt, repoPath, mode: agentModeEl.value, sessionId, resume }),
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      append(dec.decode(value, { stream: true }));
+      const chunk = dec.decode(value, { stream: true });
+      agentText += chunk;
+      append(chunk);
     }
+    // The HTTP turn finished, so the session now exists on disk; the next
+    // message in this tab can resume it instead of starting fresh.
+    if (convo) convo.started = true;
   } catch (e) {
-    append(`\n⚠ ${e.message}\n`, "err");
+    const msg = `\n⚠ ${e.message}\n`;
+    agentText += msg;
+    append(msg, "err");
   } finally {
+    // Persist the agent's reply as one transcript turn so it survives reloads
+    // and tab switches (renderTranscript rebuilds the console from these turns).
+    if (convo) {
+      convo.turns.push({ role: "agent", text: agentText });
+      persist();
+    }
     agentActive = false;
     $("agentRun").disabled = false;
     // a finished agent run may have changed files — nothing to refetch from GitHub,
@@ -2395,6 +2453,32 @@ async function runAgent() {
       runChecksFlow({ auto: true });
     }
   }
+}
+
+// Render a single transcript turn as a span, mirroring append()'s styling.
+function renderTurn(turn) {
+  if (!turn) return;
+  const node = document.createElement("span");
+  if (turn.role === "user") {
+    node.className = "user";
+    node.textContent = `\n› ${turn.text}\n`;
+  } else if (turn.role === "sys") {
+    node.className = "sys";
+    node.textContent = turn.text;
+  } else {
+    node.textContent = turn.text; // agent output
+  }
+  consoleOut.appendChild(node);
+}
+
+// Rebuild the console from the given tab's stored conversation. Called when a
+// tab is activated so each tab shows its own thread.
+function renderTranscript(key) {
+  consoleOut.textContent = "";
+  const convo = key ? conversationFor(key) : null;
+  if (!convo) return;
+  for (const turn of convo.turns) renderTurn(turn);
+  consoleOut.scrollTop = consoleOut.scrollHeight;
 }
 
 function append(text, cls) {

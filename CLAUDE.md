@@ -53,7 +53,12 @@ Four backend modules, each a focused concern, wired together in `index.js`:
 - **`server/agent.js`** — spawns Claude Code and translates its `stream-json`
   output (one JSON event per line) into readable console text via `formatEvent`.
   This is the part a browser fundamentally can't do — it needs a local process
-  with filesystem access.
+  with filesystem access. `buildAgentArgs()` (exported, unit-tested) assembles
+  the CLI args and threads **multi-turn session** flags: the first turn of a
+  conversation passes `--session-id <uuid>` (the frontend mints the UUID), and
+  later turns pass `--resume <uuid>` to continue the same Claude Code session —
+  the two are mutually exclusive. `runAgent` takes `sessionId` + `resume`, which
+  `/api/agent` reads from the request body.
 - **`server/checks.js`** — detects the repo's test/lint command
   (`detectCheckCommand`: `package.json` scripts → README → CLAUDE.md → language
   markers; no CI parsing) and runs it (`runChecks`) by spawning a shell in the
@@ -77,6 +82,20 @@ Single global `state` object holding open PR tabs, persisted to `localStorage`
 `keyOf()`. The agent console reads the streaming `/api/agent` response with a
 `ReadableStream` reader and appends decoded chunks live. Diffs are rendered from
 GitHub's per-file `patch` strings parsed client-side by `parsePatch()`.
+
+**Per-tab chat / sessions.** Each tab owns a conversation in
+`state.conversations[key] = { sessionId, started, turns: [{ role, text }] }`
+(`conversationFor()` lazily creates one with `crypto.randomUUID()`;
+`resetConversation()` — wired to the **New chat** button — starts a fresh
+thread). `runAgent()` records the user's turn, streams the reply (accumulating
+it into one `agent` turn), and flips `started → true` on completion so the next
+message resumes the session. `renderTranscript(key)` rebuilds the console from
+the stored turns and is called from `activate()`, so switching tabs swaps
+threads; transcripts persist across reloads. Chat is **turn-based** — headless
+`claude -p` runs each turn to completion and can't pause mid-run, so the agent
+"asks for input" by ending a turn with a question that the user's next message
+answers. The **Clear** button only wipes the screen; **New chat** resets the
+thread.
 
 ### Request flow
 

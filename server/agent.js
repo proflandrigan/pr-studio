@@ -32,7 +32,20 @@ export const MODE_INFO = {
   },
 };
 
-export function runAgent({ prompt, repoPath, mode = "review", onData, onError, onClose }) {
+export function buildAgentArgs({ prompt, mode, sessionId, resume }) {
+  const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+  if (sessionId) {
+    if (resume) {
+      args.push("--resume", sessionId);
+    } else {
+      args.push("--session-id", sessionId);
+    }
+  }
+  args.push(...(MODES[mode] || MODES.review));
+  return args;
+}
+
+export function runAgent({ prompt, repoPath, mode = "review", sessionId, resume, onData, onError, onClose }) {
   if (!prompt || !prompt.trim()) {
     onError("No task provided.");
     onClose(1);
@@ -44,7 +57,7 @@ export function runAgent({ prompt, repoPath, mode = "review", onData, onError, o
     return null;
   }
 
-  const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", ...(MODES[mode] || MODES.review)];
+  const args = buildAgentArgs({ prompt, mode, sessionId, resume });
 
   let child;
   try {

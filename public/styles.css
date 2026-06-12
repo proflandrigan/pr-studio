@@ -1634,6 +1634,10 @@ body {
 .console-out .sys {
   color: var(--muted);
 }
+.console-out .user {
+  color: #8ab4f8;
+  font-weight: 600;
+}
 .console-out .exit-ok {
   color: var(--add);
 }
