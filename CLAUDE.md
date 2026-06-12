@@ -84,14 +84,21 @@ Single global `state` object holding open PR tabs, persisted to `localStorage`
 GitHub's per-file `patch` strings parsed client-side by `parsePatch()`.
 
 **Per-tab chat / sessions.** Each tab owns a conversation in
-`state.conversations[key] = { sessionId, started, turns: [{ role, text }] }`
+`state.conversations[key] = { sessionId, started, turns: [{ role, text, cls? }] }`
 (`conversationFor()` lazily creates one with `crypto.randomUUID()`;
 `resetConversation()` — wired to the **New chat** button — starts a fresh
 thread). `runAgent()` records the user's turn, streams the reply (accumulating
 it into one `agent` turn), and flips `started → true` on completion so the next
-message resumes the session. `renderTranscript(key)` rebuilds the console from
+message resumes the session. Auto-run checks append their own `out` turns
+(header/body/result, each with an optional `cls`) to the active tab so the
+trust signal persists too. `renderTranscript(key)` rebuilds the console from
 the stored turns and is called from `activate()`, so switching tabs swaps
-threads; transcripts persist across reloads. Chat is **turn-based** — headless
+threads; transcripts persist across reloads. Because the console is a single
+global element shared by every tab, run output is routed through `emit()`: it
+buffers each fragment on the module-level `liveRun = { key, pieces }` and only
+paints to the DOM while that run's tab is on screen — so a run that keeps
+streaming after a tab switch never bleeds into another tab, and switching back
+replays its in-progress output. Chat is **turn-based** — headless
 `claude -p` runs each turn to completion and can't pause mid-run, so the agent
 "asks for input" by ending a turn with a question that the user's next message
 answers. The **Clear** button only wipes the screen; **New chat** resets the

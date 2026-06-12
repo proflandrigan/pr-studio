@@ -2268,6 +2268,21 @@ function buildCommentReviewPrompt(prRef, mode) {
 }
 
 let agentActive = false;
+// In-progress run output (agent or checks) for the tab keyed by `key`. The
+// console is one global element shared by every tab, so a run that keeps
+// streaming after the user switches tabs must NOT paint into another tab's
+// view, yet switching back to its own tab should re-show the progress so far.
+// `pieces` holds {text, cls} fragments; renderTranscript replays them for the
+// matching tab. Committed to convo.turns when the run finishes, then cleared.
+let liveRun = null;
+
+// Stream one fragment of a run: buffer it (so a tab switch-back can replay it)
+// and paint it to the shared console only while this run's tab is on screen.
+function emit(key, text, cls) {
+  if (liveRun && liveRun.key === key) liveRun.pieces.push({ text, cls });
+  if (state.active === key) append(text, cls);
+}
+
 // Populate the checks command field for the current repo path: a saved
 // per-repo override wins; otherwise auto-detect from the backend.
 async function refreshCheckCmd() {
@@ -2319,12 +2334,19 @@ async function runChecksFlow(opts = {}) {
   }
 
   consoleEl.classList.remove("collapsed");
-  append(`\n› checks: ${command}\n`, "sys");
+  // Checks share the global console with the per-tab agent chat, so route their
+  // output through liveRun/emit too: only paint to the active tab, and commit
+  // the result to that tab's transcript so it survives switches and reloads.
+  const key = state.active;
+  liveRun = { key, pieces: [] };
+  const header = `\n› checks: ${command}\n`;
+  emit(key, header, "sys");
   checksActive = true;
   const btn = $("runChecks");
   if (btn) btn.disabled = true;
 
   let out = "";
+  let errMsg = "";
   try {
     const res = await fetch("/api/checks/run", {
       method: "POST",
@@ -2338,19 +2360,28 @@ async function runChecksFlow(opts = {}) {
       if (done) break;
       const chunk = dec.decode(value, { stream: true });
       out += chunk;
-      append(chunk);
+      emit(key, chunk);
     }
   } catch (e) {
-    append(`\n⚠ ${e.message}\n`, "err");
+    errMsg = `\n⚠ ${e.message}\n`;
+    emit(key, errMsg, "err");
   } finally {
     checksActive = false;
     if (btn) btn.disabled = false;
     const m = out.match(/\[exit (\d+)\]/);
     const passed = m && m[1] === "0";
-    append(
-      passed ? "\n✓ Checks passed\n" : "\n✗ Checks failed\n",
-      passed ? "exit-ok" : "exit-bad"
-    );
+    const footer = passed ? "\n✓ Checks passed\n" : "\n✗ Checks failed\n";
+    emit(key, footer, passed ? "exit-ok" : "exit-bad");
+    // Commit the run to the tab's transcript (header + body + result) so it
+    // persists like the agent's turns, then clear the in-progress buffer.
+    const convo = key ? conversationFor(key) : null;
+    if (convo) {
+      convo.turns.push({ role: "out", text: header, cls: "sys" });
+      convo.turns.push({ role: "out", text: out + errMsg });
+      convo.turns.push({ role: "out", text: footer, cls: passed ? "exit-ok" : "exit-bad" });
+      persist();
+    }
+    liveRun = null;
   }
 }
 
@@ -2405,7 +2436,10 @@ async function runAgent() {
     convo.turns.push({ role: "user", text: prompt });
     persist();
   }
-  append(`\n› ${prompt}\n`, "user");
+  // The user echo is already a stored turn, so paint it directly (only while
+  // its tab is on screen) rather than buffering it on liveRun.
+  liveRun = { key, pieces: [] };
+  if (state.active === key) append(`\n› ${prompt}\n`, "user");
   input.value = "";
   agentActive = true;
   $("agentRun").disabled = true;
@@ -2424,7 +2458,7 @@ async function runAgent() {
       if (done) break;
       const chunk = dec.decode(value, { stream: true });
       agentText += chunk;
-      append(chunk);
+      emit(key, chunk);
     }
     // The HTTP turn finished, so the session now exists on disk; the next
     // message in this tab can resume it instead of starting fresh.
@@ -2432,14 +2466,15 @@ async function runAgent() {
   } catch (e) {
     const msg = `\n⚠ ${e.message}\n`;
     agentText += msg;
-    append(msg, "err");
+    emit(key, msg, "err");
   } finally {
     // Persist the agent's reply as one transcript turn so it survives reloads
-    // and tab switches (renderTranscript rebuilds the console from these turns).
+    // and tab switches, then clear the in-progress buffer.
     if (convo) {
       convo.turns.push({ role: "agent", text: agentText });
       persist();
     }
+    liveRun = null;
     agentActive = false;
     $("agentRun").disabled = false;
     // a finished agent run may have changed files — nothing to refetch from GitHub,
@@ -2455,29 +2490,28 @@ async function runAgent() {
   }
 }
 
-// Render a single transcript turn as a span, mirroring append()'s styling.
+// Render a single stored transcript turn, mirroring append()'s styling. A
+// "user" turn gets the prompt prefix + accent; everything else carries its own
+// optional class (sys, exit-ok, exit-bad, or none for plain agent/checks output).
 function renderTurn(turn) {
   if (!turn) return;
-  const node = document.createElement("span");
   if (turn.role === "user") {
-    node.className = "user";
-    node.textContent = `\n› ${turn.text}\n`;
-  } else if (turn.role === "sys") {
-    node.className = "sys";
-    node.textContent = turn.text;
+    append(`\n› ${turn.text}\n`, "user");
   } else {
-    node.textContent = turn.text; // agent output
+    append(turn.text, turn.cls);
   }
-  consoleOut.appendChild(node);
 }
 
-// Rebuild the console from the given tab's stored conversation. Called when a
-// tab is activated so each tab shows its own thread.
+// Rebuild the console from the given tab's stored conversation, then replay any
+// in-progress run for that tab. Called when a tab is activated so each tab shows
+// its own thread — including a run still streaming after a tab switch.
 function renderTranscript(key) {
   consoleOut.textContent = "";
   const convo = key ? conversationFor(key) : null;
-  if (!convo) return;
-  for (const turn of convo.turns) renderTurn(turn);
+  if (convo) for (const turn of convo.turns) renderTurn(turn);
+  if (liveRun && liveRun.key === key) {
+    for (const p of liveRun.pieces) append(p.text, p.cls);
+  }
   consoleOut.scrollTop = consoleOut.scrollHeight;
 }
 
