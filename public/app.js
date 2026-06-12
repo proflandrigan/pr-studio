@@ -615,6 +615,7 @@ function closeTab(key) {
   } else {
     showEmpty();
   }
+  renderPins();
   persist();
 }
 
