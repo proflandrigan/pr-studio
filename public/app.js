@@ -7,7 +7,6 @@ const state = {
   active: null,
   repoPaths: {}, // key -> local path
   checkCmds: {}, // repoPath -> command override
-  autoCheck: true, // auto-run checks after a fix-mode agent run
   agentMode: "review",
   showResolved: false, // view toggle: include resolved inline threads in the diff
   done: {}, // { [prKey]: ["inline:<id>", "convo:<id>", ...] } — local triage, persisted
@@ -82,7 +81,6 @@ function persist() {
     active: state.active,
     repoPaths: state.repoPaths,
     checkCmds: state.checkCmds,
-    autoCheck: state.autoCheck,
     agentMode: state.agentMode,
     showResolved: state.showResolved,
     done: state.done,
@@ -114,7 +112,6 @@ const consoleEl = $("console");
 const consoleOut = $("consoleOut");
 const repoPathEl = $("repoPath");
 const checkCmdEl = $("checkCmd");
-const autoCheckEl = $("autoCheck");
 const agentModeEl = $("agentMode");
 const modeChipEl = $("modeChip");
 
@@ -152,7 +149,6 @@ async function init() {
   if (saved) {
     state.repoPaths = saved.repoPaths || {};
     state.checkCmds = saved.checkCmds || {};
-    state.autoCheck = saved.autoCheck !== false; // default on
     state.breakdowns = saved.breakdowns || {};
     state.pins = saved.pins || {};
     state.conversations = saved.conversations || {};
@@ -161,7 +157,6 @@ async function init() {
     state.done = saved.done || {};
     state.hideDone = Boolean(saved.hideDone);
     agentModeEl.value = state.agentMode;
-    if (autoCheckEl) autoCheckEl.checked = state.autoCheck;
     renderModeChip();
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
@@ -373,6 +368,8 @@ function wireEvents() {
     runAgent();
   });
 
+  $("agentInput").addEventListener("input", () => setAgentStatus(""));
+
   $("clearConsole").addEventListener("click", () => {
     consoleOut.textContent = "";
   });
@@ -403,9 +400,15 @@ function wireEvents() {
       append("\n⚠ Open a PR tab first — there's no active PR to address comments for.\n", "err");
       return;
     }
-    const input = $("agentInput");
-    input.value = buildCommentReviewPrompt(tab.key, agentModeEl.value);
-    input.focus();
+    if (agentActive) return; // a turn is already streaming; don't double-fire
+    // Addressing comments means editing — force fix mode (mirror the mode
+    // <select> change handler's side-effects) before kicking off.
+    agentModeEl.value = "fix";
+    state.agentMode = "fix";
+    renderModeChip();
+    persist();
+    $("agentInput").value = buildCommentReviewPrompt(tab.key);
+    runAgent();
   });
 
   repoPathEl.addEventListener("change", () => {
@@ -425,14 +428,6 @@ function wireEvents() {
   });
 
   $("runChecks").addEventListener("click", () => runChecksFlow());
-
-  if (autoCheckEl) {
-    autoCheckEl.checked = state.autoCheck;
-    autoCheckEl.addEventListener("change", () => {
-      state.autoCheck = autoCheckEl.checked;
-      persist();
-    });
-  }
 
   statusEl.addEventListener("click", () => {
     $("statusPopover").hidden = !$("statusPopover").hidden;
@@ -2254,16 +2249,18 @@ async function resolveThread(tab, cm) {
 }
 
 // ---------- Agent ----------
-// Build the canned task prompt that invokes the pr-comment-review skill against
-// a specific PR, with a note clarifying what the currently-selected mode does.
-function buildCommentReviewPrompt(prRef, mode) {
-  const note =
-    mode === "fix"
-      ? "Mode is `fix` — you may apply edits to address the comments."
-      : "Mode is `review` (read-only) — triage the comments and propose fixes, but do not edit files.";
+// Build the task prompt that drives the pr-comment-review skill against a
+// specific PR in ORCHESTRATED mode (triage → one plan approval → implement
+// items one at a time). The "Address PR comments" button forces fix mode, so
+// the prompt always assumes edits are allowed.
+function buildCommentReviewPrompt(prRef) {
   return (
-    `Use the pr-comment-review skill to address the review and discussion ` +
-    `comments on PR ${prRef}. ${note}`
+    `Use the pr-comment-review skill in ORCHESTRATED mode to address the review ` +
+    `and discussion comments on PR ${prRef}. Skip the Phase 0 mode question — go ` +
+    `straight to orchestrated: triage every thread into a categorized fix plan, ` +
+    `present the plan and wait for my approval, then implement the actionable ` +
+    `items one at a time, reading the real code first and QA-ing each change. ` +
+    `Mode is \`fix\` — you may apply edits.`
   );
 }
 
@@ -2406,13 +2403,19 @@ function buildPinnedContext() {
   );
 }
 
+// UI-only "it's your turn" hint shown after an agent turn ends. Not persisted,
+// never part of the transcript. "" clears it.
+function setAgentStatus(text) {
+  const el = $("agentStatus");
+  if (el) el.textContent = text || "";
+}
+
 async function runAgent() {
   if (agentActive) return;
   const input = $("agentInput");
   const prompt = input.value.trim();
   if (!prompt) return;
   const fullPrompt = buildPinnedContext() + prompt;
-  const runMode = agentModeEl.value;
 
   consoleEl.classList.remove("collapsed");
   const repoPath = repoPathEl.value.trim();
@@ -2443,6 +2446,7 @@ async function runAgent() {
   input.value = "";
   agentActive = true;
   $("agentRun").disabled = true;
+  setAgentStatus("");
 
   let agentText = "";
   try {
@@ -2477,16 +2481,14 @@ async function runAgent() {
     liveRun = null;
     agentActive = false;
     $("agentRun").disabled = false;
+    // Turn finished — make it legible that the ball is in the user's court.
+    // Only when this run's tab is on screen (don't hijack focus on a bg tab).
+    if (state.active === key) {
+      setAgentStatus("awaiting your reply");
+      $("agentInput").focus();
+    }
     // a finished agent run may have changed files — nothing to refetch from GitHub,
     // but remind the user their local checkout moved.
-
-    // "Edited and tests green" — after a fix-mode run, auto-run the checks so
-    // the user gets the trust signal without a manual click. Silent if no
-    // command/path is resolved. Gated by the "auto" toggle so a user chaining
-    // several small fixes can suppress checks until they're done.
-    if (runMode === "fix" && state.autoCheck) {
-      runChecksFlow({ auto: true });
-    }
   }
 }
 
@@ -2507,6 +2509,7 @@ function renderTurn(turn) {
 // its own thread — including a run still streaming after a tab switch.
 function renderTranscript(key) {
   consoleOut.textContent = "";
+  setAgentStatus("");
   const convo = key ? conversationFor(key) : null;
   if (convo) for (const turn of convo.turns) renderTurn(turn);
   if (liveRun && liveRun.key === key) {
