@@ -324,6 +324,12 @@ function wireEvents() {
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".my-prs-wrap")) myPrsPanel.hidden = true;
   });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".pr-title-wrap")) {
+      const m = $("prTitleMenu");
+      if (m) m.hidden = true;
+    }
+  });
 }
 
 // ---------- Open / fetch PR ----------
@@ -534,7 +540,13 @@ function renderReview() {
 
   reviewEl.innerHTML = `
     <div class="pr-head">
-      <h1 class="pr-title"><a href="${pr.url}" target="_blank" rel="noopener">${esc(pr.title)}</a></h1>
+      <div class="pr-title-wrap">
+        <h1 class="pr-title"><button type="button" class="pr-title-btn" id="prTitleBtn">${esc(pr.title)}<span class="pr-title-caret">▾</span></button></h1>
+        <div class="pr-title-menu" id="prTitleMenu" hidden>
+          <a class="pr-title-menu-item" id="prTitleOpen" href="${pr.url}" target="_blank" rel="noopener">Open in GitHub ↗</a>
+          <button type="button" class="pr-title-menu-item" id="prTitleCopy" data-url="${esc(pr.url)}">Copy URL</button>
+        </div>
+      </div>
       <div class="pr-meta">
         <span class="badge ${stateClass}">${stateLabel}</span>
         <span>@${esc(pr.author)}</span>
@@ -548,6 +560,8 @@ function renderReview() {
     </div>
   `;
 
+  wireTitleMenu();
+
   // Which sidebar entry is selected is transient UI state kept on the in-memory
   // tab so it survives re-renders (e.g. after posting a comment). Default: the
   // PR description/overview, like GitHub's Conversation tab.
@@ -557,6 +571,42 @@ function renderReview() {
 
   renderSidebar(tab);
   renderMain(tab);
+}
+
+// Wires the clickable PR-title dropdown (Open in GitHub / Copy URL). Called on
+// every renderReview because reviewEl.innerHTML is rebuilt each time.
+function wireTitleMenu() {
+  const btn = $("prTitleBtn");
+  const menu = $("prTitleMenu");
+  if (!btn || !menu) return;
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menu.hidden = !menu.hidden;
+  });
+
+  // "Open in GitHub" is a plain <a> — let it navigate, just close the menu.
+  $("prTitleOpen")?.addEventListener("click", () => {
+    menu.hidden = true;
+  });
+
+  const copyBtn = $("prTitleCopy");
+  copyBtn?.addEventListener("click", async () => {
+    const url = copyBtn.dataset.url;
+    try {
+      await navigator.clipboard.writeText(url);
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => {
+        copyBtn.textContent = "Copy URL";
+        menu.hidden = true;
+      }, 1500);
+    } catch {
+      copyBtn.textContent = "Copy failed";
+      setTimeout(() => {
+        copyBtn.textContent = "Copy URL";
+      }, 1500);
+    }
+  });
 }
 
 // Renders the "Chunks" sidebar view: an empty state with a "Break into chunks"
