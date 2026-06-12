@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { extractJson, buildBreakdownPrompt } from "./agent.js";
+import { extractJson, buildBreakdownPrompt, buildAgentArgs } from "./agent.js";
 
 test("extractJson parses a plain JSON array string", () => {
   const result = extractJson('[{"title":"a"}]');
@@ -11,6 +11,40 @@ test("extractJson parses a ```json fenced array", () => {
   const text = "```json\n[{\"title\":\"a\"}]\n```";
   const result = extractJson(text);
   assert.deepStrictEqual(result, [{ title: "a" }]);
+});
+
+test("buildAgentArgs omits session flags when no sessionId", () => {
+  const args = buildAgentArgs({ prompt: "hi", mode: "review" });
+  assert.ok(args.includes("-p"));
+  assert.ok(args.includes("hi"));
+  assert.ok(args.includes("--output-format"));
+  assert.ok(args.includes("stream-json"));
+  assert.ok(!args.includes("--session-id"));
+  assert.ok(!args.includes("--resume"));
+  assert.ok(args.includes("--disallowedTools"));
+});
+
+test("buildAgentArgs uses --session-id for a new session", () => {
+  const args = buildAgentArgs({ prompt: "hi", mode: "fix", sessionId: "abc-123" });
+  const i = args.indexOf("--session-id");
+  assert.ok(i !== -1);
+  assert.strictEqual(args[i + 1], "abc-123");
+  assert.ok(!args.includes("--resume"));
+  assert.ok(args.includes("--permission-mode"));
+  assert.ok(args.includes("acceptEdits"));
+});
+
+test("buildAgentArgs uses --resume for a continued session", () => {
+  const args = buildAgentArgs({ prompt: "hi", mode: "fix", sessionId: "abc-123", resume: true });
+  const i = args.indexOf("--resume");
+  assert.ok(i !== -1);
+  assert.strictEqual(args[i + 1], "abc-123");
+  assert.ok(!args.includes("--session-id"));
+});
+
+test("buildAgentArgs falls back to review flags for unknown mode", () => {
+  const args = buildAgentArgs({ prompt: "hi", mode: "nonexistent" });
+  assert.ok(args.includes("--disallowedTools"));
 });
 
 test("extractJson parses an array embedded in surrounding prose", () => {

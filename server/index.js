@@ -156,7 +156,7 @@ app.post(
 
 // Streams Claude Code output back as plain text chunks.
 app.post("/api/agent", (req, res) => {
-  const { prompt, repoPath, mode } = req.body || {};
+  const { prompt, repoPath, mode, sessionId, resume } = req.body || {};
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
@@ -165,13 +165,19 @@ app.post("/api/agent", (req, res) => {
     prompt,
     repoPath: repoPath || process.env.DEFAULT_REPO_PATH,
     mode,
+    sessionId,
+    resume,
     onData: (text) => res.write(text),
     onError: (text) => res.write("\n\u26a0 " + text.replace(/\n/g, "\n\u26a0 ")),
     onClose: (code) => res.end(`\n[exit ${code}]\n`),
   });
 
-  req.on("close", () => {
-    if (child && !child.killed) child.kill("SIGTERM");
+  // Kill the agent only on a genuine client disconnect. Listen on `res`, not
+  // `req`: in modern Node the request stream emits "close" as soon as its body
+  // is consumed (express.json() reads it up front), which would otherwise tear
+  // the child down before it produced any output (seen as "[exit null]").
+  res.on("close", () => {
+    if (!res.writableFinished && child && !child.killed) child.kill("SIGTERM");
   });
 });
 
@@ -199,8 +205,10 @@ app.post("/api/checks/run", (req, res) => {
     onClose: (code) => res.end(`\n[exit ${code}]\n`),
   });
 
-  req.on("close", () => {
-    if (child && !child.killed) child.kill("SIGTERM");
+  // See the /api/agent handler: kill on real client disconnect (res "close"),
+  // not on req "close", which now fires as soon as the request body is read.
+  res.on("close", () => {
+    if (!res.writableFinished && child && !child.killed) child.kill("SIGTERM");
   });
 });
 
