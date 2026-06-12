@@ -1707,3 +1707,56 @@ body {
   color: var(--muted-dim);
   font-style: italic;
 }
+
+.pin-to-chat {
+  position: fixed;
+  z-index: 50;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #1a1405;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.pin-to-chat:hover {
+  filter: brightness(1.08);
+}
+
+.pin-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px 0;
+}
+.pin-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 6px 3px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  max-width: 100%;
+}
+.pin-chip-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pin-chip-x {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.pin-chip-x:hover {
+  color: var(--accent);
+}
