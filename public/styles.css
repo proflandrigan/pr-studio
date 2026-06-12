@@ -1568,6 +1568,24 @@ body {
   border-color: var(--accent);
 }
 
+.check-cmd {
+  width: 180px;
+}
+
+.auto-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.auto-check input {
+  cursor: pointer;
+}
+
 .console-out {
   flex: 1;
   margin: 0;

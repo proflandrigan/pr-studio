@@ -39,7 +39,7 @@ or the real environment:
 
 ## Architecture
 
-Three backend modules, each a focused concern, wired together in `index.js`:
+Four backend modules, each a focused concern, wired together in `index.js`:
 
 - **`server/index.js`** — Express app. JSON API + static file serving. The
   `wrap()` helper turns thrown errors (with optional `err.status`) into JSON
@@ -54,6 +54,12 @@ Three backend modules, each a focused concern, wired together in `index.js`:
   output (one JSON event per line) into readable console text via `formatEvent`.
   This is the part a browser fundamentally can't do — it needs a local process
   with filesystem access.
+- **`server/checks.js`** — detects the repo's test/lint command
+  (`detectCheckCommand`: `package.json` scripts → README → CLAUDE.md → language
+  markers; no CI parsing) and runs it (`runChecks`) by spawning a shell in the
+  checkout, streaming output back. Exit code 0 = pass. Surfaced via
+  `GET /api/checks/detect` and the streaming `POST /api/checks/run` (the second
+  text/plain streaming endpoint besides `/api/agent`).
 
 **Permission modes** (`MODES` in `agent.js`) are the core safety boundary:
 - `review` — read-only: `--allowedTools Read Glob Grep Bash(git*)`, Write/Edit
@@ -74,6 +80,27 @@ GitHub's per-file `patch` strings parsed client-side by `parsePatch()`.
 
 ### Request flow
 
-Browser `fetch` → `/api/*` in `index.js` → `github.js` (GitHub data) or
-`agent.js` (spawns `claude`). Diff data is GitHub's per-file patch, so unchanged
-regions far from edits and large/binary files are omitted by design.
+Browser `fetch` → `/api/*` in `index.js` → `github.js` (GitHub data),
+`agent.js` (spawns `claude`), or `checks.js` (test/lint commands). Diff data is
+GitHub's per-file patch, so unchanged regions far from edits and large/binary
+files are omitted by design. The console header's test/lint command field
+auto-fills from `/api/checks/detect`, the override persists per repo path in
+`localStorage`, and checks auto-run after a `fix`-mode agent completion.
+
+**What triggers checks.** Two paths, both in `runChecksFlow()` (`app.js`):
+1. **Manual** — the "Run checks" button, available any time and independent of
+   the agent.
+2. **Automatic** — only after a `fix`-mode agent run finishes. `runAgent()`
+   captures the mode at the start (`runMode`) and, in its `finally`, calls
+   `runChecksFlow({ auto: true })` when `runMode === "fix"` **and**
+   `state.autoCheck` is on. `review` runs never trigger checks (nothing was
+   edited). The `auto` flag makes the no-command/no-path case silent so a fix in
+   a repo with no detectable command is a no-op rather than a warning.
+
+The **auto toggle** (`#autoCheck`, `state.autoCheck`, default on, persisted) lets
+a user chaining several small fixes suppress the post-fix run until they're done;
+the manual button still works while it's off.
+
+Note the boundary: checks are **not** run by the Claude agent. The agent only
+edits files; `runChecks()` in `checks.js` spawns the command directly via a shell
+from the server, outside the agent's `MODES` sandbox. Exit code 0 = pass.
