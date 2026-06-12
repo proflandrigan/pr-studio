@@ -4,6 +4,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 // Which Claude Code binary to call. Override with CLAUDE_BIN if it's not on PATH.
 export const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
@@ -45,14 +46,28 @@ export function buildAgentArgs({ prompt, mode, sessionId, resume }) {
   return args;
 }
 
+// Decide the cwd the agent runs in. fix mode must have a real checkout (it edits
+// files); review mode can answer from the PR context + pinned code in the prompt,
+// so a missing/invalid path falls back to a neutral temp dir instead of erroring —
+// we only demand a checkout when the user is asking for changes/fixes.
+export function resolveAgentCwd({ repoPath, mode = "review" }) {
+  const valid = repoPath && existsSync(repoPath) && statSync(repoPath).isDirectory();
+  if (valid) return { cwd: repoPath };
+  if (mode === "fix") {
+    return { error: `Repo path not found: ${repoPath || "(empty)"}\nSet it to a local checkout of the PR's repository.` };
+  }
+  return { cwd: tmpdir() };
+}
+
 export function runAgent({ prompt, repoPath, mode = "review", sessionId, resume, onData, onError, onClose }) {
   if (!prompt || !prompt.trim()) {
     onError("No task provided.");
     onClose(1);
     return null;
   }
-  if (!repoPath || !existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
-    onError(`Repo path not found: ${repoPath || "(empty)"}\nSet it to a local checkout of the PR's repository.`);
+  const { cwd, error } = resolveAgentCwd({ repoPath, mode });
+  if (error) {
+    onError(error);
     onClose(1);
     return null;
   }
@@ -61,7 +76,7 @@ export function runAgent({ prompt, repoPath, mode = "review", sessionId, resume,
 
   let child;
   try {
-    child = spawn(CLAUDE_BIN, args, { cwd: repoPath });
+    child = spawn(CLAUDE_BIN, args, { cwd });
   } catch (e) {
     onError(`Could not launch "${CLAUDE_BIN}". Is Claude Code installed and on your PATH?\n${e.message}`);
     onClose(1);

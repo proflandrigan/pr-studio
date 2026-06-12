@@ -1,6 +1,39 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { extractJson, buildBreakdownPrompt, buildAgentArgs, formatEvent } from "./agent.js";
+import { tmpdir } from "node:os";
+import { extractJson, buildBreakdownPrompt, buildAgentArgs, formatEvent, resolveAgentCwd } from "./agent.js";
+
+test("resolveAgentCwd falls back to a temp dir for review with no path", () => {
+  const r = resolveAgentCwd({ repoPath: "", mode: "review" });
+  assert.strictEqual(r.cwd, tmpdir());
+  assert.strictEqual(r.error, undefined);
+});
+
+test("resolveAgentCwd falls back to a temp dir for review with a bogus path", () => {
+  const r = resolveAgentCwd({ repoPath: "/no/such/dir/here", mode: "review" });
+  assert.strictEqual(r.cwd, tmpdir());
+  assert.strictEqual(r.error, undefined);
+});
+
+test("resolveAgentCwd errors for fix mode with no valid checkout", () => {
+  const empty = resolveAgentCwd({ repoPath: "", mode: "fix" });
+  assert.strictEqual(empty.cwd, undefined);
+  assert.match(empty.error, /Repo path not found/);
+
+  const bogus = resolveAgentCwd({ repoPath: "/no/such/dir/here", mode: "fix" });
+  assert.strictEqual(bogus.cwd, undefined);
+  assert.match(bogus.error, /Repo path not found/);
+});
+
+test("resolveAgentCwd uses a real directory in any mode", () => {
+  const review = resolveAgentCwd({ repoPath: process.cwd(), mode: "review" });
+  assert.strictEqual(review.cwd, process.cwd());
+  assert.strictEqual(review.error, undefined);
+
+  const fix = resolveAgentCwd({ repoPath: process.cwd(), mode: "fix" });
+  assert.strictEqual(fix.cwd, process.cwd());
+  assert.strictEqual(fix.error, undefined);
+});
 
 test("extractJson parses a plain JSON array string", () => {
   const result = extractJson('[{"title":"a"}]');
