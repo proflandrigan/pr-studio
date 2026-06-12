@@ -86,3 +86,21 @@ GitHub's per-file patch, so unchanged regions far from edits and large/binary
 files are omitted by design. The console header's test/lint command field
 auto-fills from `/api/checks/detect`, the override persists per repo path in
 `localStorage`, and checks auto-run after a `fix`-mode agent completion.
+
+**What triggers checks.** Two paths, both in `runChecksFlow()` (`app.js`):
+1. **Manual** — the "Run checks" button, available any time and independent of
+   the agent.
+2. **Automatic** — only after a `fix`-mode agent run finishes. `runAgent()`
+   captures the mode at the start (`runMode`) and, in its `finally`, calls
+   `runChecksFlow({ auto: true })` when `runMode === "fix"` **and**
+   `state.autoCheck` is on. `review` runs never trigger checks (nothing was
+   edited). The `auto` flag makes the no-command/no-path case silent so a fix in
+   a repo with no detectable command is a no-op rather than a warning.
+
+The **auto toggle** (`#autoCheck`, `state.autoCheck`, default on, persisted) lets
+a user chaining several small fixes suppress the post-fix run until they're done;
+the manual button still works while it's off.
+
+Note the boundary: checks are **not** run by the Claude agent. The agent only
+edits files; `runChecks()` in `checks.js` spawns the command directly via a shell
+from the server, outside the agent's `MODES` sandbox. Exit code 0 = pass.

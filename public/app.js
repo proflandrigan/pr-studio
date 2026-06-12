@@ -7,6 +7,7 @@ const state = {
   active: null,
   repoPaths: {}, // key -> local path
   checkCmds: {}, // repoPath -> command override
+  autoCheck: true, // auto-run checks after a fix-mode agent run
   agentMode: "review",
   showResolved: false, // view toggle: include resolved inline threads in the diff
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
@@ -22,6 +23,7 @@ function persist() {
     active: state.active,
     repoPaths: state.repoPaths,
     checkCmds: state.checkCmds,
+    autoCheck: state.autoCheck,
     agentMode: state.agentMode,
     showResolved: state.showResolved,
     breakdowns: state.breakdowns,
@@ -49,6 +51,7 @@ const consoleEl = $("console");
 const consoleOut = $("consoleOut");
 const repoPathEl = $("repoPath");
 const checkCmdEl = $("checkCmd");
+const autoCheckEl = $("autoCheck");
 const agentModeEl = $("agentMode");
 const modeChipEl = $("modeChip");
 
@@ -86,10 +89,12 @@ async function init() {
   if (saved) {
     state.repoPaths = saved.repoPaths || {};
     state.checkCmds = saved.checkCmds || {};
+    state.autoCheck = saved.autoCheck !== false; // default on
     state.breakdowns = saved.breakdowns || {};
     state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
     agentModeEl.value = state.agentMode;
+    if (autoCheckEl) autoCheckEl.checked = state.autoCheck;
     renderModeChip();
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
@@ -313,6 +318,14 @@ function wireEvents() {
   });
 
   $("runChecks").addEventListener("click", () => runChecksFlow());
+
+  if (autoCheckEl) {
+    autoCheckEl.checked = state.autoCheck;
+    autoCheckEl.addEventListener("change", () => {
+      state.autoCheck = autoCheckEl.checked;
+      persist();
+    });
+  }
 
   statusEl.addEventListener("click", () => {
     $("statusPopover").hidden = !$("statusPopover").hidden;
@@ -2017,8 +2030,9 @@ async function runAgent() {
 
     // "Edited and tests green" — after a fix-mode run, auto-run the checks so
     // the user gets the trust signal without a manual click. Silent if no
-    // command/path is resolved.
-    if (runMode === "fix") {
+    // command/path is resolved. Gated by the "auto" toggle so a user chaining
+    // several small fixes can suppress checks until they're done.
+    if (runMode === "fix" && state.autoCheck) {
       runChecksFlow({ auto: true });
     }
   }
