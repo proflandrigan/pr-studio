@@ -10,6 +10,8 @@ const state = {
   autoCheck: true, // auto-run checks after a fix-mode agent run
   agentMode: "review",
   showResolved: false, // view toggle: include resolved inline threads in the diff
+  done: {}, // { [prKey]: ["inline:<id>", "convo:<id>", ...] } — local triage, persisted
+  hideDone: false, // view toggle: hide locally-done comments
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
   pins: {}, // key -> [ { id, file, side, startLine, endLine, code } ]
 };
@@ -64,6 +66,8 @@ function persist() {
     autoCheck: state.autoCheck,
     agentMode: state.agentMode,
     showResolved: state.showResolved,
+    done: state.done,
+    hideDone: state.hideDone,
     breakdowns: state.breakdowns,
     pins: state.pins,
   };
@@ -133,6 +137,8 @@ async function init() {
     state.pins = saved.pins || {};
     state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
+    state.done = saved.done || {};
+    state.hideDone = Boolean(saved.hideDone);
     agentModeEl.value = state.agentMode;
     if (autoCheckEl) autoCheckEl.checked = state.autoCheck;
     renderModeChip();
@@ -920,6 +926,15 @@ function renderSidebar(tab) {
     });
   }
 
+  const hideDoneToggle = $("hideDoneToggle");
+  if (hideDoneToggle) {
+    hideDoneToggle.addEventListener("change", () => {
+      state.hideDone = hideDoneToggle.checked;
+      persist();
+      renderReview();
+    });
+  }
+
   // File / overview rows select; folder rows toggle their collapsed state.
   el.querySelectorAll("[data-view]").forEach((item) => {
     item.addEventListener("click", (e) => {
@@ -1367,7 +1382,7 @@ function buildPreviewElement(file, tab, content) {
 
     for (let ln = blk.startLine; ln <= blk.endLine; ln++) {
       if (byLine.right.has(ln) && !placedRight.has(ln)) {
-        byLine.right.get(ln).forEach((cm) => root.appendChild(renderInlineThread(cm)));
+        byLine.right.get(ln).forEach((cm) => root.appendChild(renderInlineThread(cm, { tab })));
         placedRight.add(ln);
       }
     }
@@ -1375,12 +1390,12 @@ function buildPreviewElement(file, tab, content) {
 
   const orphanedRight = [...byLine.right.entries()].filter(([line]) => !placedRight.has(line));
   for (const [, arr] of orphanedRight) {
-    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true })));
+    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true, tab })));
   }
   // LEFT-side comments target removed lines, which have no home in a preview
   // of the current file content — show them as orphaned, like outdated threads.
   for (const arr of byLine.left.values()) {
-    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true })));
+    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true, tab })));
   }
 
   return root;
@@ -1625,7 +1640,7 @@ function buildNotebookElement(file, tab, content) {
       const span = cellSpans[i];
       for (let ln = span.startLine; ln <= span.endLine; ln++) {
         if (byLine.right.has(ln) && !placedRight.has(ln)) {
-          byLine.right.get(ln).forEach((cm) => root.appendChild(renderInlineThread(cm)));
+          byLine.right.get(ln).forEach((cm) => root.appendChild(renderInlineThread(cm, { tab })));
           placedRight.add(ln);
         }
       }
@@ -1634,12 +1649,12 @@ function buildNotebookElement(file, tab, content) {
 
   const orphanedRight = [...byLine.right.entries()].filter(([line]) => !placedRight.has(line));
   for (const [, arr] of orphanedRight) {
-    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true })));
+    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true, tab })));
   }
   // LEFT-side comments target removed lines, which have no home in a preview
   // of the current file content — show them as orphaned, like outdated threads.
   for (const arr of byLine.left.values()) {
-    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true })));
+    arr.forEach((cm) => root.appendChild(renderInlineThread(cm, { orphaned: true, tab })));
   }
 
   return root;
@@ -1736,11 +1751,11 @@ function buildDiffElement(file, tab) {
     diff.appendChild(renderDiffRow(row, file, tab));
     if (row.type === "del") {
       if (row.oldLine && byLine.left.has(row.oldLine)) {
-        byLine.left.get(row.oldLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
+        byLine.left.get(row.oldLine).forEach((cm) => diff.appendChild(renderInlineThread(cm, { tab })));
         placedLeft.add(row.oldLine);
       }
     } else if (row.newLine && byLine.right.has(row.newLine)) {
-      byLine.right.get(row.newLine).forEach((cm) => diff.appendChild(renderInlineThread(cm)));
+      byLine.right.get(row.newLine).forEach((cm) => diff.appendChild(renderInlineThread(cm, { tab })));
       placedRight.add(row.newLine);
     }
   }
@@ -1749,7 +1764,7 @@ function buildDiffElement(file, tab) {
   const orphanedRight = [...byLine.right.entries()].filter(([line]) => !placedRight.has(line));
   const orphanedLeft = [...byLine.left.entries()].filter(([line]) => !placedLeft.has(line));
   for (const [, arr] of [...orphanedRight, ...orphanedLeft]) {
-    arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true })));
+    arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true, tab })));
   }
   return diff;
 }
@@ -1760,7 +1775,8 @@ function renderReviewControls(tab) {
   const inline = (tab.comments && tab.comments.inline) || [];
   const resolved = inline.filter((c) => c.resolved).length;
   const outdated = inline.filter((c) => c.outdated).length;
-  if (!resolved && !outdated) return "";
+  const done = doneCount(tab);
+  if (!resolved && !outdated && !done) return "";
 
   const parts = [];
   if (resolved) {
@@ -1768,6 +1784,13 @@ function renderReviewControls(tab) {
       <label class="review-toggle">
         <input type="checkbox" id="showResolvedToggle" ${state.showResolved ? "checked" : ""} />
         Show resolved (${resolved})
+      </label>`);
+  }
+  if (done) {
+    parts.push(`
+      <label class="review-toggle">
+        <input type="checkbox" id="hideDoneToggle" ${state.hideDone ? "checked" : ""} />
+        Hide done (${done})
       </label>`);
   }
   if (outdated) {
@@ -1780,7 +1803,9 @@ function renderReviewControls(tab) {
 // hidden unless the user opts in; outdated threads are always shown (marked).
 function visibleInline(tab) {
   const inline = (tab.comments && tab.comments.inline) || [];
-  return state.showResolved ? inline : inline.filter((c) => !c.resolved);
+  let list = state.showResolved ? inline : inline.filter((c) => !c.resolved);
+  if (state.hideDone) list = list.filter((c) => !isDone(tab, "inline", c.id));
+  return list;
 }
 
 // Returns { right, left } maps of line -> [comment, ...] for inline comments on
@@ -1802,12 +1827,46 @@ function inlineCommentsByLine(tab, filename) {
   return { right, left };
 }
 
+// ---------- Local "done" triage (localStorage only, never posted to GitHub) ----------
+function doneKey(type, id) {
+  return `${type}:${id}`;
+}
+function isDone(tab, type, id) {
+  const list = state.done[tab.key];
+  return Array.isArray(list) && list.includes(doneKey(type, id));
+}
+// Set/clear done for one comment. Returns the new boolean state. Persists.
+function setDone(tab, type, id, value) {
+  const key = doneKey(type, id);
+  const list = state.done[tab.key] ? state.done[tab.key].slice() : [];
+  const at = list.indexOf(key);
+  if (value && at === -1) list.push(key);
+  if (!value && at !== -1) list.splice(at, 1);
+  state.done[tab.key] = list;
+  persist();
+  return Boolean(value);
+}
+function toggleDone(tab, type, id) {
+  return setDone(tab, type, id, !isDone(tab, type, id));
+}
+// Count of done comments currently present in this tab's loaded comments.
+function doneCount(tab) {
+  const c = tab.comments;
+  if (!c) return 0;
+  let n = 0;
+  for (const cm of c.inline || []) if (isDone(tab, "inline", cm.id)) n++;
+  for (const cm of c.conversation || []) if (isDone(tab, "convo", cm.id)) n++;
+  return n;
+}
+
 function renderInlineThread(cm, opts = {}) {
+  const tab = opts.tab;
   const el = document.createElement("div");
   const classes = ["inline-comment"];
   if (opts.orphaned) classes.push("orphaned");
   if (cm.outdated) classes.push("outdated");
   if (cm.resolved) classes.push("resolved");
+  if (tab && isDone(tab, "inline", cm.id)) classes.push("done");
   el.className = classes.join(" ");
 
   const badges =
@@ -1817,9 +1876,43 @@ function renderInlineThread(cm, opts = {}) {
   const where = opts.orphaned
     ? `<small>${esc(cm.path)}:${cm.originalLine ?? cm.line ?? "?"}</small>`
     : "";
+  const isCmDone = tab ? isDone(tab, "inline", cm.id) : false;
+  const doneBtn =
+    `<button type="button" class="cm-action cm-done${isCmDone ? " on" : ""}" data-done>` +
+    `${isCmDone ? "✓ Done" : "Mark done"}</button>`;
+  // Resolve toggles thread state on GitHub; needs a token and a thread id.
+  const canResolve = tab && cm.threadId && healthInfo && healthInfo.githubToken;
+  const resolveBtn = canResolve
+    ? `<button type="button" class="cm-action cm-resolve${cm.resolved ? " on" : ""}" data-resolve>` +
+      `${cm.resolved ? "Unresolve" : "Resolve"}</button>`
+    : "";
+  // Reply posts into this thread via the replies endpoint; needs a token.
+  const canReply = tab && healthInfo && healthInfo.githubToken;
+  const replyBtn = canReply
+    ? `<button type="button" class="cm-action cm-reply" data-reply>Reply</button>`
+    : "";
   el.innerHTML = `
-    <div class="comment-head">@${esc(cm.author)}${badges}${where}</div>
+    <div class="comment-head">@${esc(cm.author)}${badges}${where}<span class="cm-actions">${resolveBtn}${replyBtn}${doneBtn}</span></div>
     <div class="comment-body">${esc(cm.body)}</div>`;
+
+  if (tab) {
+    const btn = el.querySelector("[data-done]");
+    if (btn) btn.addEventListener("click", (e) => {
+      e.stopPropagation(); // diff rows are click-to-comment; don't trigger that
+      toggleDone(tab, "inline", cm.id);
+      renderReview();
+    });
+    const rbtn = el.querySelector("[data-resolve]");
+    if (rbtn) rbtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      resolveThread(tab, cm);
+    });
+    const replybtn = el.querySelector("[data-reply]");
+    if (replybtn) replybtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openReplyComposer(el, tab, cm);
+    });
+  }
   return el;
 }
 
@@ -1952,6 +2045,32 @@ function openInlineComposer(rowEl, file, target, tab) {
   ta.focus();
 }
 
+// Opens a composer beneath an inline thread to post a threaded reply. Routes
+// through postComment with `replyTo` (the parent comment id), which the server
+// sends to GitHub's review-comment replies endpoint.
+function openReplyComposer(threadEl, tab, cm) {
+  // one composer at a time
+  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  const box = document.createElement("div");
+  box.className = "inline-composer";
+  box.innerHTML = `
+    <textarea placeholder="Reply to @${esc(cm.author)} — Cmd/Ctrl+Enter to post"></textarea>
+    <button class="btn accent" type="button">Reply</button>
+    <button class="btn ghost" type="button">Cancel</button>
+  `;
+  const ta = box.querySelector("textarea");
+  const [postBtn, cancelBtn] = box.querySelectorAll("button");
+  const post = () => postComment(tab, ta.value, { replyTo: cm.id }, box);
+  postBtn.addEventListener("click", post);
+  cancelBtn.addEventListener("click", () => box.remove());
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") post();
+    if (e.key === "Escape") box.remove();
+  });
+  threadEl.insertAdjacentElement("afterend", box);
+  ta.focus();
+}
+
 // Opens a composer for a notebook cell that has no overlapping diff line
 // (or whose notebook has no patch at all). Posts a top-level conversation
 // comment prefixed with a reference to the cell, since GitHub inline review
@@ -1994,17 +2113,19 @@ function renderConversation(tab) {
   } else {
     // Inline (code-review) comments render in the diff next to their line; the
     // conversation section is only top-level PR comments.
-    const all = [...(c.conversation || [])].sort(
+    let all = [...(c.conversation || [])].sort(
       (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
     );
+    if (state.hideDone) all = all.filter((cm) => !isDone(tab, "convo", cm.id));
 
     if (!all.length) {
       html += `<div class="notice info">No conversation comments yet.</div>`;
     } else {
       for (const cm of all) {
+        const d = isDone(tab, "convo", cm.id);
         html += `
-          <div class="comment">
-            <div class="comment-head">@${esc(cm.author)}</div>
+          <div class="comment${d ? " done" : ""}">
+            <div class="comment-head">@${esc(cm.author)}<span class="cm-actions"><button type="button" class="cm-action cm-done${d ? " on" : ""}" data-done-convo="${cm.id}">${d ? "✓ Done" : "Mark done"}</button></span></div>
             <div class="comment-body">${esc(cm.body)}</div>
           </div>`;
       }
@@ -2017,6 +2138,13 @@ function renderConversation(tab) {
       <button class="btn accent" id="convoPost" type="button">Comment</button>
     </div>`;
   el.innerHTML = html;
+
+  el.querySelectorAll("[data-done-convo]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      toggleDone(tab, "convo", Number(btn.dataset.doneConvo));
+      renderConversation(tab);
+    });
+  });
 
   const input = $("convoInput");
   const send = () => postComment(tab, input.value, null);
@@ -2036,7 +2164,9 @@ async function postComment(tab, body, inline, composerEl) {
     number: tab.number,
     body,
   };
-  if (inline) {
+  if (inline && inline.replyTo) {
+    payload.replyTo = inline.replyTo;
+  } else if (inline) {
     payload.path = inline.path;
     payload.line = inline.line;
     payload.side = inline.side || "RIGHT";
@@ -2054,6 +2184,31 @@ async function postComment(tab, body, inline, composerEl) {
     loadComments(tab.key);
   } catch (e) {
     flashError("Comment failed: " + e.message);
+  }
+}
+
+// Toggle a review thread's resolution on GitHub. On a successful *resolve*, also
+// mark its comments locally done (resolve implies done; unresolve does not undo
+// done). Reloads comments afterward so the resolved state reflects GitHub.
+async function resolveThread(tab, cm) {
+  if (!cm.threadId) return;
+  try {
+    const r = await fetch("/api/pr/thread/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: cm.threadId, resolved: !cm.resolved }),
+    });
+    const res = await r.json();
+    if (!r.ok) throw new Error(res.error || "Failed to update thread");
+    if (res.resolved) {
+      // Auto-mark every loaded comment in this thread as done.
+      for (const c of (tab.comments && tab.comments.inline) || []) {
+        if (c.threadId === cm.threadId) setDone(tab, "inline", c.id, true);
+      }
+    }
+    loadComments(tab.key);
+  } catch (e) {
+    flashError("Resolve failed: " + e.message);
   }
 }
 

@@ -215,8 +215,10 @@ export async function listMyPullRequests() {
 
 // Resolution and outdated state lives on the review *thread*, not the comment,
 // and only GraphQL exposes it. Returns a Map of REST comment id -> { resolved,
-// outdated }. Empty when there's no token (GraphQL unavailable) so REST-only
-// callers degrade cleanly. `databaseId` is the GraphQL alias for the REST id.
+// outdated, threadId }. `threadId` is the thread's GraphQL node id, used to
+// resolve/unresolve via mutation. Empty when there's no token (GraphQL
+// unavailable) so REST-only callers degrade cleanly. `databaseId` is the
+// GraphQL alias for the REST id.
 async function getReviewThreadState({ owner, repo, number }) {
   const query = `
     query ($owner: String!, $repo: String!, $number: Int!) {
@@ -224,6 +226,7 @@ async function getReviewThreadState({ owner, repo, number }) {
         pullRequest(number: $number) {
           reviewThreads(first: 100) {
             nodes {
+              id
               isResolved
               isOutdated
               comments(first: 100) { nodes { databaseId } }
@@ -238,7 +241,7 @@ async function getReviewThreadState({ owner, repo, number }) {
   for (const t of threads) {
     for (const c of t.comments?.nodes || []) {
       if (c.databaseId != null) {
-        map.set(c.databaseId, { resolved: t.isResolved, outdated: t.isOutdated });
+        map.set(c.databaseId, { resolved: t.isResolved, outdated: t.isOutdated, threadId: t.id });
       }
     }
   }
@@ -274,6 +277,7 @@ export async function getComments({ owner, repo, number }) {
         originalSide: c.original_side,
         resolved: Boolean(st.resolved),
         outdated: Boolean(st.outdated),
+        threadId: st.threadId || null,
         createdAt: c.created_at,
       };
     }),
@@ -309,5 +313,43 @@ export async function postInlineComment({ owner, repo, number, commitId, path, l
   return gh(`/repos/${owner}/${repo}/pulls/${number}/comments`, {
     method: "POST",
     body: JSON.stringify({ body, commit_id: commitId, path, line, side }),
+  });
+}
+
+// Resolve or unresolve a PR review thread. GitHub exposes thread resolution only
+// via GraphQL, keyed by the thread's node id (see getComments' `threadId`). A
+// token is required; without one (or on a GraphQL error) `graphql()` returns null
+// and we throw so the route surfaces a clear error instead of silently no-op-ing.
+export async function setReviewThreadResolved({ threadId, resolved }) {
+  const mutation = resolved
+    ? `mutation ($id: ID!) {
+         resolveReviewThread(input: { threadId: $id }) {
+           thread { id isResolved }
+         }
+       }`
+    : `mutation ($id: ID!) {
+         unresolveReviewThread(input: { threadId: $id }) {
+           thread { id isResolved }
+         }
+       }`;
+  const data = await graphql(mutation, { id: threadId });
+  const thread =
+    data?.resolveReviewThread?.thread || data?.unresolveReviewThread?.thread;
+  if (!thread) {
+    throw Object.assign(
+      new Error("Could not change thread resolution (token required, and you must have access to the thread)."),
+      { status: 502 }
+    );
+  }
+  return { threadId: thread.id, resolved: thread.isResolved };
+}
+
+// Reply to an existing inline review thread. GitHub threads the reply onto the
+// thread containing `commentId` via a dedicated replies endpoint (no path/line/
+// commit needed — the parent comment already anchors the thread).
+export async function replyToReviewComment({ owner, repo, number, commentId, body }) {
+  return gh(`/repos/${owner}/${repo}/pulls/${number}/comments/${commentId}/replies`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
   });
 }
