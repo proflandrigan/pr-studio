@@ -68,6 +68,10 @@ export function runAgent({ prompt, repoPath, mode = "review", sessionId, resume,
     return null;
   }
 
+  // Signal EOF on stdin so `claude -p` doesn't wait ~3s for piped input
+  // (and emit the "stdin data received in 3s, proceeding without it" warning).
+  child.stdin.end();
+
   let buffer = "";
   child.stdout.on("data", (chunk) => {
     buffer += chunk.toString();
@@ -206,6 +210,10 @@ export function runBreakdown({ files, title, repoPath }) {
       return;
     }
 
+    // Signal EOF on stdin so `claude -p` doesn't wait ~3s for piped input
+    // (and emit the "stdin data received in 3s, proceeding without it" warning).
+    child.stdin.end();
+
     let stdout = "";
     let stderr = "";
 
@@ -248,7 +256,7 @@ export function runBreakdown({ files, title, repoPath }) {
   });
 }
 
-function formatEvent(evt) {
+export function formatEvent(evt) {
   // Translate a Claude Code stream-json event into a readable console line.
   if (evt.type === "assistant" && evt.message && Array.isArray(evt.message.content)) {
     return evt.message.content
@@ -258,13 +266,6 @@ function formatEvent(evt) {
         return "";
       })
       .join("");
-  }
-  if (evt.type === "result") {
-    const cost = evt.total_cost_usd != null ? ` · $${evt.total_cost_usd.toFixed(4)}` : "";
-    return `\n[done${cost}]\n`;
-  }
-  if (evt.type === "system" && evt.subtype === "init") {
-    return `[session ${evt.session_id || ""} started]\n`;
   }
   return "";
 }

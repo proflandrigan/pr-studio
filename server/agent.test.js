@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { extractJson, buildBreakdownPrompt, buildAgentArgs } from "./agent.js";
+import { extractJson, buildBreakdownPrompt, buildAgentArgs, formatEvent } from "./agent.js";
 
 test("extractJson parses a plain JSON array string", () => {
   const result = extractJson('[{"title":"a"}]');
@@ -69,4 +69,28 @@ test("buildBreakdownPrompt includes title, filenames, and JSON array instruction
   assert.ok(prompt.includes("My PR"));
   assert.ok(prompt.includes("a.js"));
   assert.ok(prompt.includes("JSON array"));
+});
+
+test("formatEvent drops the result/cost footer", () => {
+  assert.equal(formatEvent({ type: "result", total_cost_usd: 0.94 }), "");
+});
+
+test("formatEvent drops the session-init banner", () => {
+  assert.equal(formatEvent({ type: "system", subtype: "init", session_id: "abc" }), "");
+});
+
+test("formatEvent renders assistant text", () => {
+  const out = formatEvent({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "hello" }] },
+  });
+  assert.equal(out, "hello");
+});
+
+test("formatEvent renders tool_use lines", () => {
+  const out = formatEvent({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "a.js" } }] },
+  });
+  assert.equal(out, "\n  → Read(a.js)\n");
 });

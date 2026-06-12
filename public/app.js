@@ -14,10 +14,23 @@ const state = {
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
   pins: {}, // key -> [ { id, file, side, startLine, endLine, code } ]
   conversations: {}, // key -> { sessionId, started, turns: [ { role, text } ] }
+  consoleHeight: null, // px height of the agent console, persisted from drag-resize
 };
 
 function keyOf(o, r, n) {
   return `${o}/${r}#${n}`;
+}
+
+// ---------- Resizable console ----------
+const CONSOLE_MIN_H = 120;
+function consoleMaxH() {
+  return Math.round(window.innerHeight * 0.8);
+}
+function applyConsoleHeight(h) {
+  if (h == null) return;
+  const clamped = Math.max(CONSOLE_MIN_H, Math.min(h, consoleMaxH()));
+  state.consoleHeight = clamped;
+  consoleEl.style.setProperty("--console-height", clamped + "px");
 }
 
 // ---------- Pinned context ----------
@@ -88,6 +101,7 @@ function persist() {
     breakdowns: state.breakdowns,
     pins: state.pins,
     conversations: state.conversations,
+    consoleHeight: state.consoleHeight,
   };
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(slim));
@@ -156,6 +170,7 @@ async function init() {
     state.showResolved = Boolean(saved.showResolved);
     state.done = saved.done || {};
     state.hideDone = Boolean(saved.hideDone);
+    state.consoleHeight = saved.consoleHeight || null;
     agentModeEl.value = state.agentMode;
     renderModeChip();
     for (const ref of saved.refs || []) {
@@ -167,6 +182,8 @@ async function init() {
       activate(state.tabs[0].key);
     }
   }
+
+  if (state.consoleHeight) applyConsoleHeight(state.consoleHeight);
 
   wireEvents();
   refreshCheckCmd();
@@ -368,7 +385,16 @@ function wireEvents() {
     runAgent();
   });
 
-  $("agentInput").addEventListener("input", () => setAgentStatus(""));
+  $("agentInput").addEventListener("input", () => {
+    setAgentStatus("");
+    autoGrowInput();
+  });
+  $("agentInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("agentForm").requestSubmit();
+    }
+  });
 
   $("clearConsole").addEventListener("click", () => {
     consoleOut.textContent = "";
@@ -381,6 +407,32 @@ function wireEvents() {
     renderTranscript(state.active);
   });
 
+  // Drag-resize the console via its top-edge handle
+  const resizeHandle = $("consoleResize");
+  if (resizeHandle) {
+    resizeHandle.addEventListener("pointerdown", (e) => {
+      if (consoleEl.classList.contains("collapsed")) return;
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = consoleEl.getBoundingClientRect().height;
+      consoleEl.classList.add("resizing");
+      resizeHandle.setPointerCapture(e.pointerId);
+      const onMove = (ev) => {
+        // Dragging UP (smaller clientY) grows the console.
+        applyConsoleHeight(startH + (startY - ev.clientY));
+      };
+      const onUp = () => {
+        resizeHandle.releasePointerCapture(e.pointerId);
+        consoleEl.classList.remove("resizing");
+        resizeHandle.removeEventListener("pointermove", onMove);
+        resizeHandle.removeEventListener("pointerup", onUp);
+        persist();
+      };
+      resizeHandle.addEventListener("pointermove", onMove);
+      resizeHandle.addEventListener("pointerup", onUp);
+    });
+  }
+
   // Collapse console by clicking its label area
   $("console").querySelector(".console-head").addEventListener("click", (e) => {
     if (e.target.closest(".console-controls")) return;
@@ -391,6 +443,10 @@ function wireEvents() {
     state.agentMode = agentModeEl.value;
     renderModeChip();
     persist();
+  });
+
+  $("agentStop").addEventListener("click", () => {
+    if (agentAbort) agentAbort.abort();
   });
 
   $("addrCommentsBtn").addEventListener("click", () => {
@@ -2265,6 +2321,7 @@ function buildCommentReviewPrompt(prRef) {
 }
 
 let agentActive = false;
+let agentAbort = null; // AbortController for the in-flight agent turn
 // In-progress run output (agent or checks) for the tab keyed by `key`. The
 // console is one global element shared by every tab, so a run that keeps
 // streaming after the user switches tabs must NOT paint into another tab's
@@ -2274,10 +2331,17 @@ let agentActive = false;
 let liveRun = null;
 
 // Stream one fragment of a run: buffer it (so a tab switch-back can replay it)
-// and paint it to the shared console only while this run's tab is on screen.
+// and paint it into the live element only while this run's tab is on screen.
 function emit(key, text, cls) {
   if (liveRun && liveRun.key === key) liveRun.pieces.push({ text, cls });
-  if (state.active === key) append(text, cls);
+  if (state.active !== key || !liveRun || !liveRun.el) return;
+  if (liveRun.role === "agent") {
+    liveRun.elText = (liveRun.elText || "") + text;
+    liveRun.el.textContent = liveRun.elText; // raw while streaming
+    scrollConsole();
+  } else {
+    appendTermLine(liveRun.el, text, cls);
+  }
 }
 
 // Populate the checks command field for the current repo path: a saved
@@ -2330,7 +2394,8 @@ async function runChecksFlow() {
   // output through liveRun/emit too: only paint to the active tab, and commit
   // the result to that tab's transcript so it survives switches and reloads.
   const key = state.active;
-  liveRun = { key, pieces: [] };
+  liveRun = { key, role: "out", pieces: [], el: null };
+  if (state.active === key) liveRun.el = appendTermBlock();
   const header = `\n› checks: ${command}\n`;
   emit(key, header, "sys");
   checksActive = true;
@@ -2405,6 +2470,23 @@ function setAgentStatus(text) {
   if (el) el.textContent = text || "";
 }
 
+// Locks the input + shows the pulsing "Claude is working…" indicator while an
+// agent turn is streaming.
+// Grow the textarea to fit its content, capped by CSS max-height.
+function autoGrowInput() {
+  const el = $("agentInput");
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 160) + "px";
+}
+
+function setAgentBusy(busy) {
+  const input = $("agentInput");
+  const indicator = $("workingIndicator");
+  if (input) input.disabled = busy;
+  if (indicator) indicator.hidden = !busy;
+}
+
 async function runAgent() {
   if (agentActive) return;
   const input = $("agentInput");
@@ -2436,12 +2518,20 @@ async function runAgent() {
   }
   // The user echo is already a stored turn, so paint it directly (only while
   // its tab is on screen) rather than buffering it on liveRun.
-  liveRun = { key, pieces: [] };
-  if (state.active === key) append(`\n› ${prompt}\n`, "user");
+  liveRun = { key, role: "agent", pieces: [], el: null, elText: "" };
+  if (state.active === key) {
+    appendUserBubble(prompt);
+    liveRun.el = appendAgentBubble();
+  }
   input.value = "";
+  input.style.height = "auto";
   agentActive = true;
   $("agentRun").disabled = true;
+  setAgentBusy(true);
   setAgentStatus("");
+  agentAbort = new AbortController();
+  $("agentRun").hidden = true;
+  $("agentStop").hidden = false;
 
   let agentText = "";
   try {
@@ -2449,6 +2539,7 @@ async function runAgent() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: fullPrompt, repoPath, mode: agentModeEl.value, sessionId, resume }),
+      signal: agentAbort.signal,
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -2463,9 +2554,11 @@ async function runAgent() {
     // message in this tab can resume it instead of starting fresh.
     if (convo) convo.started = true;
   } catch (e) {
-    const msg = `\n⚠ ${e.message}\n`;
-    agentText += msg;
-    emit(key, msg, "err");
+    if (e.name !== "AbortError") {
+      const msg = `\n⚠ ${e.message}\n`;
+      agentText += msg;
+      emit(key, msg, "err");
+    }
   } finally {
     // Persist the agent's reply as one transcript turn so it survives reloads
     // and tab switches, then clear the in-progress buffer.
@@ -2473,9 +2566,16 @@ async function runAgent() {
       convo.turns.push({ role: "agent", text: agentText });
       persist();
     }
+    if (state.active === key && liveRun && liveRun.el) {
+      finalizeAgentBubble(liveRun.el, agentText);
+    }
     liveRun = null;
     agentActive = false;
     $("agentRun").disabled = false;
+    $("agentRun").hidden = false;
+    $("agentStop").hidden = true;
+    agentAbort = null;
+    setAgentBusy(false);
     // Turn finished — make it legible that the ball is in the user's court.
     // Only when this run's tab is on screen (don't hijack focus on a bg tab).
     if (state.active === key) {
@@ -2487,18 +2587,6 @@ async function runAgent() {
   }
 }
 
-// Render a single stored transcript turn, mirroring append()'s styling. A
-// "user" turn gets the prompt prefix + accent; everything else carries its own
-// optional class (sys, exit-ok, exit-bad, or none for plain agent/checks output).
-function renderTurn(turn) {
-  if (!turn) return;
-  if (turn.role === "user") {
-    append(`\n› ${turn.text}\n`, "user");
-  } else {
-    append(turn.text, turn.cls);
-  }
-}
-
 // Rebuild the console from the given tab's stored conversation, then replay any
 // in-progress run for that tab. Called when a tab is activated so each tab shows
 // its own thread — including a run still streaming after a tab switch.
@@ -2506,19 +2594,96 @@ function renderTranscript(key) {
   consoleOut.textContent = "";
   setAgentStatus("");
   const convo = key ? conversationFor(key) : null;
-  if (convo) for (const turn of convo.turns) renderTurn(turn);
-  if (liveRun && liveRun.key === key) {
-    for (const p of liveRun.pieces) append(p.text, p.cls);
+  if (convo) {
+    let termPre = null; // current open terminal block for consecutive out turns
+    for (const turn of convo.turns) {
+      if (turn.role === "out") {
+        if (!termPre) termPre = appendTermBlock();
+        appendTermLine(termPre, turn.text, turn.cls);
+        continue;
+      }
+      termPre = null;
+      if (turn.role === "user") appendUserBubble(turn.text);
+      else finalizeAgentBubble(appendAgentBubble(), turn.text); // agent: markdown
+    }
   }
+  // Replay an in-progress run for this tab and reconnect the live element.
+  if (liveRun && liveRun.key === key) {
+    if (liveRun.role === "agent") {
+      const bubble = appendAgentBubble();
+      liveRun.el = bubble;
+      liveRun.elText = liveRun.pieces.map((p) => p.text).join("");
+      bubble.textContent = liveRun.elText;
+    } else {
+      const pre = appendTermBlock();
+      liveRun.el = pre;
+      for (const p of liveRun.pieces) appendTermLine(pre, p.text, p.cls);
+    }
+  }
+  scrollConsole();
+}
+
+// Build + append a right-aligned user bubble.
+function appendUserBubble(text) {
+  const wrap = document.createElement("div");
+  wrap.className = "message user";
+  const bubble = document.createElement("div");
+  bubble.className = "message-bubble";
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
+  consoleOut.appendChild(wrap);
+  scrollConsole();
+  return wrap;
+}
+
+// Build + append an EMPTY left-aligned agent bubble; returns the inner element
+// streaming writes into. While streaming we set .textContent (raw); on
+// finalize we swap in rendered markdown.
+function appendAgentBubble() {
+  const wrap = document.createElement("div");
+  wrap.className = "message assistant";
+  const bubble = document.createElement("div");
+  bubble.className = "message-bubble";
+  wrap.appendChild(bubble);
+  consoleOut.appendChild(wrap);
+  scrollConsole();
+  return bubble;
+}
+
+function finalizeAgentBubble(bubbleEl, text) {
+  bubbleEl.innerHTML = `<div class="md-preview">${mdParse(text || "", { gfm: true, breaks: false })}</div>`;
+  scrollConsole();
+}
+
+// Build + append a full-width terminal block; returns the inner <pre>.
+function appendTermBlock() {
+  const wrap = document.createElement("div");
+  wrap.className = "message system";
+  const pre = document.createElement("pre");
+  pre.className = "term-block";
+  wrap.appendChild(pre);
+  consoleOut.appendChild(wrap);
+  scrollConsole();
+  return pre;
+}
+
+// Append a classed text span into a terminal <pre>.
+function appendTermLine(pre, text, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = text;
+  pre.appendChild(span);
+  scrollConsole();
+}
+
+function scrollConsole() {
   consoleOut.scrollTop = consoleOut.scrollHeight;
 }
 
+// Generic one-off notice: render as a standalone terminal block.
 function append(text, cls) {
-  const node = document.createElement("span");
-  if (cls) node.className = cls;
-  node.textContent = text;
-  consoleOut.appendChild(node);
-  consoleOut.scrollTop = consoleOut.scrollHeight;
+  const pre = appendTermBlock();
+  appendTermLine(pre, text, cls);
 }
 
 // ---------- Diff parsing ----------
