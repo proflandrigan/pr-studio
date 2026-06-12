@@ -2060,7 +2060,18 @@ function openReplyComposer(threadEl, tab, cm) {
   `;
   const ta = box.querySelector("textarea");
   const [postBtn, cancelBtn] = box.querySelectorAll("button");
-  const post = () => postComment(tab, ta.value, { replyTo: cm.id }, box);
+  let posting = false; // guard against double-submit (button stays clickable during the await)
+  const post = async () => {
+    if (posting) return;
+    posting = true;
+    postBtn.disabled = true;
+    try {
+      await postComment(tab, ta.value, { replyTo: cm.id }, box);
+    } finally {
+      posting = false;
+      postBtn.disabled = false; // box is removed on success; matters only on failure
+    }
+  };
   postBtn.addEventListener("click", post);
   cancelBtn.addEventListener("click", () => box.remove());
   ta.addEventListener("keydown", (e) => {
@@ -2143,6 +2154,7 @@ function renderConversation(tab) {
     btn.addEventListener("click", () => {
       toggleDone(tab, "convo", Number(btn.dataset.doneConvo));
       renderConversation(tab);
+      renderSidebar(tab); // refresh the "Hide done (N)" count in the review controls
     });
   });
 
