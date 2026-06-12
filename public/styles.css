@@ -1339,6 +1339,36 @@ body {
   color: var(--muted-dim);
 }
 
+/* local "done" triage: dim the comment, small ghost action buttons */
+.inline-comment.done,
+.comment.done {
+  opacity: 0.55;
+}
+.cm-actions {
+  float: right;
+  display: inline-flex;
+  gap: 6px;
+}
+.cm-action {
+  font-family: var(--sans);
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.cm-action:hover {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+.cm-action.on {
+  color: var(--add);
+  border-color: var(--add);
+}
+
 /* toolbar above the diff: resolved toggle + outdated count */
 .review-controls {
   display: flex;

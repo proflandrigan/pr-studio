@@ -16,6 +16,8 @@ import {
   getComments,
   postConversationComment,
   postInlineComment,
+  replyToReviewComment,
+  setReviewThreadResolved,
   getFileContent,
   listMyPullRequests,
   hasToken,
@@ -94,18 +96,33 @@ app.get(
 app.post(
   "/api/pr/comment",
   wrap(async (req, res) => {
-    const { owner, repo, number, body, path, line, commitId, side } = req.body;
+    const { owner, repo, number, body, path, line, commitId, side, replyTo } = req.body;
     if (!body || !body.trim()) {
       res.status(400).json({ error: "Comment body is empty." });
       return;
     }
     let result;
-    if (path && line && commitId) {
+    if (replyTo) {
+      result = await replyToReviewComment({ owner, repo, number, commentId: replyTo, body });
+    } else if (path && line && commitId) {
       result = await postInlineComment({ owner, repo, number, body, path, line, commitId, side: side || "RIGHT" });
     } else {
       result = await postConversationComment({ owner, repo, number, body });
     }
     res.json({ ok: true, url: result.html_url });
+  })
+);
+
+app.post(
+  "/api/pr/thread/resolve",
+  wrap(async (req, res) => {
+    const { threadId, resolved } = req.body || {};
+    if (!threadId) {
+      res.status(400).json({ error: "threadId is required." });
+      return;
+    }
+    const result = await setReviewThreadResolved({ threadId, resolved: resolved !== false });
+    res.json({ ok: true, ...result });
   })
 );
 

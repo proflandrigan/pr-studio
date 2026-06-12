@@ -97,6 +97,15 @@ test("GET /api/pr/file with missing params returns 400 JSON error", async () => 
   assert.strictEqual(typeof body.error, "string");
 });
 
+test("POST /api/pr/thread/resolve without threadId returns 400", async () => {
+  const res = await fetch(`${baseUrl}/api/pr/thread/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resolved: true }),
+  });
+  assert.equal(res.status, 400);
+});
+
 test("POST /api/pr/comment with empty body returns 400", async () => {
   const res = await fetch(`${baseUrl}/api/pr/comment`, {
     method: "POST",
