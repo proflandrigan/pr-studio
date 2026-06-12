@@ -11,10 +11,48 @@ const state = {
   agentMode: "review",
   showResolved: false, // view toggle: include resolved inline threads in the diff
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
+  pins: {}, // key -> [ { id, file, side, startLine, endLine, code } ]
 };
 
 function keyOf(o, r, n) {
   return `${o}/${r}#${n}`;
+}
+
+// ---------- Pinned context ----------
+// Pins live keyed by tab key (owner/repo#number) so they persist across
+// reloads alongside the other keyed maps in state. Each pin records the
+// file, diff side, line range, and the exact code text so the agent prompt
+// can quote it verbatim later.
+function pinsFor(key) {
+  if (!key) return [];
+  if (!state.pins[key]) state.pins[key] = [];
+  return state.pins[key];
+}
+
+function addPin(key, pin) {
+  if (!key || !pin) return null;
+  const list = pinsFor(key);
+  const full = {
+    id: `pin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    file: pin.file,
+    side: pin.side || "RIGHT",
+    startLine: pin.startLine,
+    endLine: pin.endLine,
+    code: pin.code || "",
+  };
+  list.push(full);
+  persist();
+  return full;
+}
+
+function removePin(key, id) {
+  const list = state.pins[key];
+  if (!list) return;
+  const i = list.findIndex((p) => p.id === id);
+  if (i !== -1) {
+    list.splice(i, 1);
+    persist();
+  }
 }
 
 function persist() {
@@ -27,6 +65,7 @@ function persist() {
     agentMode: state.agentMode,
     showResolved: state.showResolved,
     breakdowns: state.breakdowns,
+    pins: state.pins,
   };
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(slim));
@@ -91,6 +130,7 @@ async function init() {
     state.checkCmds = saved.checkCmds || {};
     state.autoCheck = saved.autoCheck !== false; // default on
     state.breakdowns = saved.breakdowns || {};
+    state.pins = saved.pins || {};
     state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
     agentModeEl.value = state.agentMode;
@@ -108,6 +148,7 @@ async function init() {
 
   wireEvents();
   refreshCheckCmd();
+  renderPins();
 }
 
 function renderStatus(h) {
@@ -147,6 +188,38 @@ function renderStatus(h) {
       <div class="status-row-note">${h.defaultRepoPath ? "Used when a PR tab has no path of its own." : "Set DEFAULT_REPO_PATH or fill in the repo path field per tab."}</div>
     </div>
   `;
+}
+
+// Render the active tab's pinned-context chips above the chat input. Each chip
+// is a removable reference to a diff selection; the × removes just that pin.
+function renderPins() {
+  const host = document.getElementById("pinChips");
+  if (!host) return;
+  const pins = state.active ? pinsFor(state.active) : [];
+  host.innerHTML = "";
+  if (pins.length === 0) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  for (const pin of pins) {
+    const name = String(pin.file || "").split("/").pop();
+    const range =
+      pin.endLine && pin.endLine !== pin.startLine
+        ? `${pin.startLine}–${pin.endLine}`
+        : `${pin.startLine}`;
+    const chip = document.createElement("span");
+    chip.className = "pin-chip";
+    chip.title = `${pin.file}:${range}`;
+    chip.innerHTML =
+      `<span class="pin-chip-label">📌 ${esc(name)}:${esc(range)}</span>` +
+      `<button type="button" class="pin-chip-x" aria-label="Remove pin">×</button>`;
+    chip.querySelector(".pin-chip-x").addEventListener("click", () => {
+      removePin(state.active, pin.id);
+      renderPins();
+    });
+    host.appendChild(chip);
+  }
 }
 
 function renderModeChip() {
@@ -359,6 +432,13 @@ function wireEvents() {
       if (m) m.hidden = true;
     }
   });
+
+  // Pin-to-chat: surface the button on a diff text selection.
+  document.addEventListener("mouseup", () => setTimeout(handlePinSelection, 0));
+  document.addEventListener("mousedown", (e) => {
+    if (pinButtonEl && !e.target.closest(".pin-to-chat")) removePinButton();
+  });
+  document.addEventListener("scroll", removePinButton, true);
 }
 
 // ---------- Open / fetch PR ----------
@@ -544,6 +624,7 @@ function activate(key) {
   if (tab) repoPathEl.value = state.repoPaths[key] || repoPathEl.value || "";
   renderTabs();
   renderReview();
+  renderPins();
   persist();
   refreshCheckCmd();
 }
@@ -1754,9 +1835,97 @@ function renderDiffRow(row, file, tab) {
     row.type === "del" ? { side: "LEFT", line: row.oldLine } : { side: "RIGHT", line: row.newLine };
 
   if (canComment && target.line) {
+    el.dataset.file = file.filename;
+    el.dataset.side = target.side;
+    el.dataset.line = String(target.line);
     el.addEventListener("click", () => openInlineComposer(el, file, target, tab));
   }
   return el;
+}
+
+// ---------- Pin-to-chat selection ----------
+let pinButtonEl = null;
+
+function removePinButton() {
+  if (pinButtonEl) {
+    pinButtonEl.remove();
+    pinButtonEl = null;
+  }
+}
+
+// Map the current text selection to a pin payload, or null if the selection
+// isn't a usable range inside a single file's diff.
+function selectionToPin() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+
+  // Anchor the pin to the file containing the selection start.
+  let node = sel.anchorNode;
+  const startRow =
+    node && (node.nodeType === 1 ? node : node.parentElement)
+      ? (node.nodeType === 1 ? node : node.parentElement).closest(".diff-row[data-line]")
+      : null;
+  if (!startRow) return null;
+
+  const file = startRow.dataset.file;
+  const side = startRow.dataset.side;
+  const container = startRow.closest(".diff");
+  if (!container) return null;
+
+  // All line-bearing rows of THIS file that the selection touches.
+  const rows = [...container.querySelectorAll(".diff-row[data-line]")].filter(
+    (r) => r.dataset.file === file && sel.containsNode(r, true)
+  );
+  if (rows.length === 0) return null;
+
+  const codeRows = rows.map((r) => {
+    const c = r.querySelector(".code");
+    return c ? c.textContent : "";
+  });
+  // Line range uses rows on the same diff side as the start row.
+  const lines = rows
+    .filter((r) => r.dataset.side === side)
+    .map((r) => Number(r.dataset.line))
+    .filter((n) => Number.isFinite(n));
+  if (lines.length === 0) return null;
+
+  return {
+    file,
+    side,
+    startLine: Math.min(...lines),
+    endLine: Math.max(...lines),
+    code: codeRows.join("\n"),
+  };
+}
+
+function handlePinSelection() {
+  const pin = selectionToPin();
+  if (!pin) {
+    removePinButton();
+    return;
+  }
+  const sel = window.getSelection();
+  const rect = sel.getRangeAt(0).getBoundingClientRect();
+
+  removePinButton();
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "pin-to-chat";
+  btn.textContent = "📌 Pin to chat";
+  // position:fixed → viewport coords from getBoundingClientRect.
+  btn.style.top = `${Math.max(4, rect.top - 34)}px`;
+  btn.style.left = `${Math.max(4, rect.left)}px`;
+  // Prevent the mousedown cleanup (below) from killing our own button.
+  btn.addEventListener("mousedown", (e) => e.preventDefault());
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (state.active) addPin(state.active, pin);
+    window.getSelection().removeAllRanges();
+    removePinButton();
+    if (typeof renderPins === "function") renderPins();
+  });
+  document.body.appendChild(btn);
+  pinButtonEl = btn;
 }
 
 function openInlineComposer(rowEl, file, target, tab) {
@@ -1988,11 +2157,33 @@ async function runChecksFlow(opts = {}) {
   }
 }
 
+// Build a "Pinned context" preamble from the active tab's pins so the agent
+// knows exactly which lines the user is pointing at, quoting the code verbatim.
+// Returns "" when there are no pins.
+function buildPinnedContext() {
+  const pins = state.active ? pinsFor(state.active) : [];
+  if (pins.length === 0) return "";
+  const blocks = pins.map((p) => {
+    const range =
+      p.endLine && p.endLine !== p.startLine
+        ? `lines ${p.startLine}-${p.endLine}`
+        : `line ${p.startLine}`;
+    return `File: ${p.file}  (${range})\n\`\`\`\n${p.code}\n\`\`\``;
+  });
+  return (
+    "[Pinned context — the user is pointing at these specific locations in the diff. " +
+    "When the request says \"here\"/\"this\", it refers to them.]\n" +
+    blocks.join("\n\n") +
+    "\n\n[End pinned context]\n\n"
+  );
+}
+
 async function runAgent() {
   if (agentActive) return;
   const input = $("agentInput");
   const prompt = input.value.trim();
   if (!prompt) return;
+  const fullPrompt = buildPinnedContext() + prompt;
   const runMode = agentModeEl.value;
 
   consoleEl.classList.remove("collapsed");
@@ -2011,7 +2202,7 @@ async function runAgent() {
     const res = await fetch("/api/agent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, repoPath, mode: agentModeEl.value }),
+      body: JSON.stringify({ prompt: fullPrompt, repoPath, mode: agentModeEl.value }),
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
