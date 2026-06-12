@@ -89,7 +89,7 @@ GitHub's per-file `patch` strings parsed client-side by `parsePatch()`.
 `resetConversation()` — wired to the **New chat** button — starts a fresh
 thread). `runAgent()` records the user's turn, streams the reply (accumulating
 it into one `agent` turn), and flips `started → true` on completion so the next
-message resumes the session. Auto-run checks append their own `out` turns
+message resumes the session. Checks append their own `out` turns
 (header/body/result, each with an optional `cls`) to the active tab so the
 trust signal persists too. `renderTranscript(key)` rebuilds the console from
 the stored turns and is called from `activate()`, so switching tabs swaps
@@ -110,22 +110,12 @@ Browser `fetch` → `/api/*` in `index.js` → `github.js` (GitHub data),
 `agent.js` (spawns `claude`), or `checks.js` (test/lint commands). Diff data is
 GitHub's per-file patch, so unchanged regions far from edits and large/binary
 files are omitted by design. The console header's test/lint command field
-auto-fills from `/api/checks/detect`, the override persists per repo path in
-`localStorage`, and checks auto-run after a `fix`-mode agent completion.
+auto-fills from `/api/checks/detect`, and the override persists per repo path in
+`localStorage`. Checks are run manually via the "Run checks" button.
 
-**What triggers checks.** Two paths, both in `runChecksFlow()` (`app.js`):
-1. **Manual** — the "Run checks" button, available any time and independent of
-   the agent.
-2. **Automatic** — only after a `fix`-mode agent run finishes. `runAgent()`
-   captures the mode at the start (`runMode`) and, in its `finally`, calls
-   `runChecksFlow({ auto: true })` when `runMode === "fix"` **and**
-   `state.autoCheck` is on. `review` runs never trigger checks (nothing was
-   edited). The `auto` flag makes the no-command/no-path case silent so a fix in
-   a repo with no detectable command is a no-op rather than a warning.
-
-The **auto toggle** (`#autoCheck`, `state.autoCheck`, default on, persisted) lets
-a user chaining several small fixes suppress the post-fix run until they're done;
-the manual button still works while it's off.
+**What triggers checks.** Checks run only via the "Run checks" button, handled by
+`runChecksFlow()` (`app.js`). It's available any time and independent of the
+agent.
 
 Note the boundary: checks are **not** run by the Claude agent. The agent only
 edits files; `runChecks()` in `checks.js` spawns the command directly via a shell

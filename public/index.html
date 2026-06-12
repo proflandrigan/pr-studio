@@ -80,10 +80,6 @@
             title="Command run for checks (auto-detected; editable)"
           />
           <button class="btn ghost" id="runChecks" type="button">Run checks</button>
-          <label class="mode auto-check" title="Auto-run checks after a fix-mode agent run. Turn off to chain several fixes without running checks each time.">
-            <input type="checkbox" id="autoCheck" checked />
-            auto
-          </label>
           <button class="btn ghost" id="newChat" type="button" title="Start a fresh conversation — the agent forgets prior turns in this tab">New chat</button>
           <button class="btn ghost" id="clearConsole" type="button">Clear</button>
         </div>
@@ -99,6 +95,7 @@
           placeholder="Task the agent — e.g. address the review comments in src/auth.js"
           autocomplete="off"
         />
+        <span class="agent-status" id="agentStatus" aria-live="polite"></span>
         <button class="btn ghost" id="addrCommentsBtn" type="button">Address PR comments</button>
         <button class="btn accent" id="agentRun" type="submit">Run</button>
       </form>
