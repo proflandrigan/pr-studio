@@ -2306,9 +2306,8 @@ async function refreshCheckCmd() {
 
 let checksActive = false;
 // Runs the resolved check command, streaming output into the console and
-// finishing with a PASS/FAIL banner. `opts.auto` makes the no-command and
-// no-path cases silent (used by the post-fix auto-run).
-async function runChecksFlow(opts = {}) {
+// finishing with a PASS/FAIL banner.
+async function runChecksFlow() {
   if (checksActive || agentActive) return;
   const repoPath = repoPathEl.value.trim();
   let command = checkCmdEl.value.trim();
@@ -2316,17 +2315,13 @@ async function runChecksFlow(opts = {}) {
     command = state.checkCmds[repoPath];
   }
   if (!repoPath) {
-    if (!opts.auto) {
-      consoleEl.classList.remove("collapsed");
-      append("\n⚠ Set a local repo path before running checks.\n", "err");
-    }
+    consoleEl.classList.remove("collapsed");
+    append("\n⚠ Set a local repo path before running checks.\n", "err");
     return;
   }
   if (!command) {
-    if (!opts.auto) {
-      consoleEl.classList.remove("collapsed");
-      append("\n⚠ No check command — type one (e.g. `npm test`) in the field next to the repo path.\n", "err");
-    }
+    consoleEl.classList.remove("collapsed");
+    append("\n⚠ No check command — type one (e.g. `npm test`) in the field next to the repo path.\n", "err");
     return;
   }
 
