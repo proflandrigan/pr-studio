@@ -50,6 +50,17 @@ Edit `.env`:
 The agent runs in *your* checkout, so after a `fix` run, `git diff` in that repo
 shows what it did. Pushing/committing stays in your hands.
 
+### Run checks after a fix
+
+The console header has a **test/lint command** field next to the repo path.
+PR Studio auto-detects it from the checkout (your `package.json` `test`/`lint`
+scripts, then `README`, then `CLAUDE.md`, then language markers like
+`pytest`/`cargo test`/`go test`); you can edit it, and your override is
+remembered per checkout. Click **Run checks** to run it and stream the output
+into the console — it finishes with a green "✓ Checks passed" or red
+"✗ Checks failed" banner. After a **fix**-mode agent run, checks run
+automatically, so "edited and tests green" lands in one place.
+
 ## Add it to the macOS dock
 
 Because it's a local web app, you can give it a real dock icon:

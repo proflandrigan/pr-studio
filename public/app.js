@@ -6,6 +6,7 @@ const state = {
   tabs: [], // { key, owner, repo, number, title, state, draft, data, comments }
   active: null,
   repoPaths: {}, // key -> local path
+  checkCmds: {}, // repoPath -> command override
   agentMode: "review",
   showResolved: false, // view toggle: include resolved inline threads in the diff
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
@@ -20,6 +21,7 @@ function persist() {
     refs: state.tabs.map((t) => ({ owner: t.owner, repo: t.repo, number: t.number })),
     active: state.active,
     repoPaths: state.repoPaths,
+    checkCmds: state.checkCmds,
     agentMode: state.agentMode,
     showResolved: state.showResolved,
     breakdowns: state.breakdowns,
@@ -46,6 +48,7 @@ const statusEl = $("status");
 const consoleEl = $("console");
 const consoleOut = $("consoleOut");
 const repoPathEl = $("repoPath");
+const checkCmdEl = $("checkCmd");
 const agentModeEl = $("agentMode");
 const modeChipEl = $("modeChip");
 
@@ -82,6 +85,7 @@ async function init() {
   const saved = loadPersisted();
   if (saved) {
     state.repoPaths = saved.repoPaths || {};
+    state.checkCmds = saved.checkCmds || {};
     state.breakdowns = saved.breakdowns || {};
     state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
@@ -98,6 +102,7 @@ async function init() {
   }
 
   wireEvents();
+  refreshCheckCmd();
 }
 
 function renderStatus(h) {
@@ -296,7 +301,18 @@ function wireEvents() {
       state.repoPaths[state.active] = repoPathEl.value.trim();
       persist();
     }
+    refreshCheckCmd();
   });
+
+  checkCmdEl.addEventListener("change", () => {
+    const repoPath = repoPathEl.value.trim();
+    if (repoPath) {
+      state.checkCmds[repoPath] = checkCmdEl.value.trim();
+      persist();
+    }
+  });
+
+  $("runChecks").addEventListener("click", () => runChecksFlow());
 
   statusEl.addEventListener("click", () => {
     $("statusPopover").hidden = !$("statusPopover").hidden;
@@ -516,6 +532,7 @@ function activate(key) {
   renderTabs();
   renderReview();
   persist();
+  refreshCheckCmd();
 }
 
 function showEmpty() {
@@ -1872,11 +1889,98 @@ function buildCommentReviewPrompt(prRef, mode) {
 }
 
 let agentActive = false;
+// Populate the checks command field for the current repo path: a saved
+// per-repo override wins; otherwise auto-detect from the backend.
+async function refreshCheckCmd() {
+  const repoPath = repoPathEl.value.trim();
+  if (!repoPath) {
+    checkCmdEl.value = "";
+    return;
+  }
+  if (state.checkCmds[repoPath] != null) {
+    checkCmdEl.value = state.checkCmds[repoPath];
+    return;
+  }
+  try {
+    const d = await fetch(
+      `/api/checks/detect?repoPath=${encodeURIComponent(repoPath)}`
+    ).then((r) => r.json());
+    // Don't clobber something the user typed while the request was in flight.
+    if (checkCmdEl.value.trim()) return;
+    if (d && d.command) checkCmdEl.value = d.command;
+  } catch {
+    /* detection is best-effort */
+  }
+}
+
+let checksActive = false;
+// Runs the resolved check command, streaming output into the console and
+// finishing with a PASS/FAIL banner. `opts.auto` makes the no-command and
+// no-path cases silent (used by the post-fix auto-run).
+async function runChecksFlow(opts = {}) {
+  if (checksActive || agentActive) return;
+  const repoPath = repoPathEl.value.trim();
+  let command = checkCmdEl.value.trim();
+  if (!command && state.active && state.checkCmds[repoPath] != null) {
+    command = state.checkCmds[repoPath];
+  }
+  if (!repoPath) {
+    if (!opts.auto) {
+      consoleEl.classList.remove("collapsed");
+      append("\n⚠ Set a local repo path before running checks.\n", "err");
+    }
+    return;
+  }
+  if (!command) {
+    if (!opts.auto) {
+      consoleEl.classList.remove("collapsed");
+      append("\n⚠ No check command — type one (e.g. `npm test`) in the field next to the repo path.\n", "err");
+    }
+    return;
+  }
+
+  consoleEl.classList.remove("collapsed");
+  append(`\n› checks: ${command}\n`, "sys");
+  checksActive = true;
+  const btn = $("runChecks");
+  if (btn) btn.disabled = true;
+
+  let out = "";
+  try {
+    const res = await fetch("/api/checks/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command, repoPath }),
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const chunk = dec.decode(value, { stream: true });
+      out += chunk;
+      append(chunk);
+    }
+  } catch (e) {
+    append(`\n⚠ ${e.message}\n`, "err");
+  } finally {
+    checksActive = false;
+    if (btn) btn.disabled = false;
+    const m = out.match(/\[exit (\d+)\]/);
+    const passed = m && m[1] === "0";
+    append(
+      passed ? "\n✓ Checks passed\n" : "\n✗ Checks failed\n",
+      passed ? "exit-ok" : "exit-bad"
+    );
+  }
+}
+
 async function runAgent() {
   if (agentActive) return;
   const input = $("agentInput");
   const prompt = input.value.trim();
   if (!prompt) return;
+  const runMode = agentModeEl.value;
 
   consoleEl.classList.remove("collapsed");
   const repoPath = repoPathEl.value.trim();
@@ -1910,6 +2014,13 @@ async function runAgent() {
     $("agentRun").disabled = false;
     // a finished agent run may have changed files — nothing to refetch from GitHub,
     // but remind the user their local checkout moved.
+
+    // "Edited and tests green" — after a fix-mode run, auto-run the checks so
+    // the user gets the trust signal without a manual click. Silent if no
+    // command/path is resolved.
+    if (runMode === "fix") {
+      runChecksFlow({ auto: true });
+    }
   }
 }
 

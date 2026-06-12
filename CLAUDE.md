@@ -39,7 +39,7 @@ or the real environment:
 
 ## Architecture
 
-Three backend modules, each a focused concern, wired together in `index.js`:
+Four backend modules, each a focused concern, wired together in `index.js`:
 
 - **`server/index.js`** — Express app. JSON API + static file serving. The
   `wrap()` helper turns thrown errors (with optional `err.status`) into JSON
@@ -54,6 +54,12 @@ Three backend modules, each a focused concern, wired together in `index.js`:
   output (one JSON event per line) into readable console text via `formatEvent`.
   This is the part a browser fundamentally can't do — it needs a local process
   with filesystem access.
+- **`server/checks.js`** — detects the repo's test/lint command
+  (`detectCheckCommand`: `package.json` scripts → README → CLAUDE.md → language
+  markers; no CI parsing) and runs it (`runChecks`) by spawning a shell in the
+  checkout, streaming output back. Exit code 0 = pass. Surfaced via
+  `GET /api/checks/detect` and the streaming `POST /api/checks/run` (the second
+  text/plain streaming endpoint besides `/api/agent`).
 
 **Permission modes** (`MODES` in `agent.js`) are the core safety boundary:
 - `review` — read-only: `--allowedTools Read Glob Grep Bash(git*)`, Write/Edit
@@ -74,6 +80,9 @@ GitHub's per-file `patch` strings parsed client-side by `parsePatch()`.
 
 ### Request flow
 
-Browser `fetch` → `/api/*` in `index.js` → `github.js` (GitHub data) or
-`agent.js` (spawns `claude`). Diff data is GitHub's per-file patch, so unchanged
-regions far from edits and large/binary files are omitted by design.
+Browser `fetch` → `/api/*` in `index.js` → `github.js` (GitHub data),
+`agent.js` (spawns `claude`), or `checks.js` (test/lint commands). Diff data is
+GitHub's per-file patch, so unchanged regions far from edits and large/binary
+files are omitted by design. The console header's test/lint command field
+auto-fills from `/api/checks/detect`, the override persists per repo path in
+`localStorage`, and checks auto-run after a `fix`-mode agent completion.

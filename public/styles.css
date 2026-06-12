@@ -1568,6 +1568,10 @@ body {
   border-color: var(--accent);
 }
 
+.check-cmd {
+  width: 180px;
+}
+
 .console-out {
   flex: 1;
   margin: 0;

@@ -22,6 +22,7 @@ import {
   tokenSource,
 } from "./github.js";
 import { runAgent, runBreakdown, MODE_INFO, CLAUDE_BIN } from "./agent.js";
+import { detectCheckCommand, runChecks } from "./checks.js";
 import { normalizeChunks } from "./breakdown.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -149,6 +150,35 @@ app.post("/api/agent", (req, res) => {
     mode,
     onData: (text) => res.write(text),
     onError: (text) => res.write("\n\u26a0 " + text.replace(/\n/g, "\n\u26a0 ")),
+    onClose: (code) => res.end(`\n[exit ${code}]\n`),
+  });
+
+  req.on("close", () => {
+    if (child && !child.killed) child.kill("SIGTERM");
+  });
+});
+
+app.get(
+  "/api/checks/detect",
+  wrap(async (req, res) => {
+    const repoPath = req.query.repoPath || process.env.DEFAULT_REPO_PATH;
+    const detected = detectCheckCommand(repoPath); // { command, source } | null
+    res.json(detected || { command: null, source: null });
+  })
+);
+
+// Streams the repo's check/lint command output back as plain text.
+app.post("/api/checks/run", (req, res) => {
+  const { command, repoPath } = req.body || {};
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  const child = runChecks({
+    command,
+    repoPath: repoPath || process.env.DEFAULT_REPO_PATH,
+    onData: (text) => res.write(text),
+    onError: (text) => res.write("\n⚠ " + text.replace(/\n/g, "\n⚠ ")),
     onClose: (code) => res.end(`\n[exit ${code}]\n`),
   });
 
