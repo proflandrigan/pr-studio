@@ -517,6 +517,14 @@ function wireEvents() {
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".my-prs-wrap")) myPrsPanel.hidden = true;
   });
+  // Filter controls live inside the panel, which is rebuilt on each open;
+  // delegate on the panel element (which persists) so one listener survives.
+  myPrsPanel.addEventListener("input", (e) => {
+    if (e.target.closest(".my-prs-filters")) renderFilteredMyPrs();
+  });
+  myPrsPanel.addEventListener("change", (e) => {
+    if (e.target.closest(".my-prs-filters")) renderFilteredMyPrs();
+  });
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".pr-title-wrap")) {
       const m = $("prTitleMenu");
@@ -626,40 +634,137 @@ async function loadComments(key) {
 }
 
 // ---------- My PRs dropdown ----------
+// Full fetched My-PRs set; filter controls render a client-side subset of this
+// without refetching. Reset each time the panel loads.
+let allMyPrs = [];
+
+// Static filter-bar markup for the My PRs panel. The controls are wired via
+// event delegation on the panel in wireEvents(), which re-runs the client-side
+// filter on input/change. The repo <select> starts with only the "All repos"
+// option — it's populated from the fetched set when the list loads.
+function prFilterBarHtml() {
+  return `
+    <div class="my-prs-filters" id="myPrsFilters">
+      <input type="text" id="prFilterText" class="my-prs-filter-text"
+             placeholder="Filter by title…" autocomplete="off">
+      <div class="my-prs-filter-selects">
+        <select id="prFilterRepo" class="my-prs-filter-select">
+          <option value="">All repos</option>
+        </select>
+        <select id="prFilterRel" class="my-prs-filter-select">
+          <option value="">All</option>
+          <option value="authored">Authored</option>
+          <option value="review-requested">Review requested</option>
+          <option value="involved">Involved</option>
+        </select>
+        <select id="prFilterStatus" class="my-prs-filter-select">
+          <option value="">Any status</option>
+          <option value="open">Open</option>
+          <option value="closed">Closed</option>
+          <option value="merged">Merged</option>
+        </select>
+        <select id="prFilterDraft" class="my-prs-filter-select">
+          <option value="">Draft &amp; ready</option>
+          <option value="ready">Ready</option>
+          <option value="draft">Draft</option>
+        </select>
+      </div>
+    </div>`;
+}
+
+// Fill the repo <select> with the distinct owner/repo values present in the
+// fetched set, alphabetised. Preserves the "All repos" default at top.
+function populateRepoFilter(prs) {
+  const sel = $("prFilterRepo");
+  if (!sel) return;
+  const repos = [...new Set(prs.map((pr) => `${pr.owner}/${pr.repo}`))].sort();
+  sel.innerHTML =
+    `<option value="">All repos</option>` +
+    repos.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
+}
+
+// Read the current filter control values.
+function readPrFilters() {
+  return {
+    text: ($("prFilterText")?.value || "").trim().toLowerCase(),
+    repo: $("prFilterRepo")?.value || "",
+    rel: $("prFilterRel")?.value || "",
+    status: $("prFilterStatus")?.value || "",
+    draft: $("prFilterDraft")?.value || "",
+  };
+}
+
+// AND across every active filter; empty string = "no constraint".
+function applyPrFilters(prs, f) {
+  return prs.filter((pr) => {
+    if (f.repo && `${pr.owner}/${pr.repo}` !== f.repo) return false;
+    if (f.rel && pr.relationship !== f.rel) return false;
+    if (f.status && pr.status !== f.status) return false;
+    if (f.draft === "draft" && !pr.draft) return false;
+    if (f.draft === "ready" && pr.draft) return false;
+    if (f.text && !String(pr.title).toLowerCase().includes(f.text)) return false;
+    return true;
+  });
+}
+
+// Re-render the list from the in-memory set through the current filters.
+function renderFilteredMyPrs() {
+  renderMyPrs(applyPrFilters(allMyPrs, readPrFilters()));
+}
+
 // Fetches the authenticated user's open PRs and renders them into the dropdown
 // panel. Selecting one reuses openPr(). Best-effort: failures render inline.
 async function loadMyPrs() {
   const panel = $("myPrsPanel");
-  panel.innerHTML = `<div class="my-prs-state">Loading…</div>`;
+  // Panel shell: persistent filter bar + a list container the list/loading/
+  // error states render into (so the filter bar never gets wiped).
+  panel.innerHTML = `${prFilterBarHtml()}<div class="my-prs-list" id="myPrsList"></div>`;
+  const list = $("myPrsList");
+  list.innerHTML = `<div class="my-prs-state">Loading…</div>`;
+  // Clear the previous load's set up front so a failed (re)load can't leave
+  // stale PRs that the filter controls would surface over the error message.
+  allMyPrs = [];
   try {
     const res = await fetch("/api/my-prs");
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || "Failed to load your PRs");
-    renderMyPrs(body.prs || []);
+    allMyPrs = body.prs || [];
+    populateRepoFilter(allMyPrs);
+    renderFilteredMyPrs();
   } catch (e) {
-    panel.innerHTML = `<div class="my-prs-state error">${esc(e.message)}</div>`;
+    list.innerHTML = `<div class="my-prs-state error">${esc(e.message)}</div>`;
   }
 }
 
+// Short human label for a relationship tag.
+function relLabel(rel) {
+  if (rel === "authored") return "authored";
+  if (rel === "review-requested") return "review";
+  return "involved";
+}
+
 function renderMyPrs(prs) {
-  const panel = $("myPrsPanel");
+  const list = $("myPrsList");
+  if (!list) return;
   if (!prs.length) {
-    panel.innerHTML = `<div class="my-prs-state">No open PRs involving you.</div>`;
+    list.innerHTML = `<div class="my-prs-state">No PRs match.</div>`;
     return;
   }
-  panel.innerHTML = prs
+  list.innerHTML = prs
     .map(
       (pr) => `
       <button type="button" class="my-pr-item" data-ref="${esc(pr.owner)}/${esc(pr.repo)}#${pr.number}">
         <span class="my-pr-item-top">
           <span class="my-pr-repo">${esc(pr.owner)}/${esc(pr.repo)}#${pr.number}</span>
-          ${pr.draft ? `<span class="my-pr-draft">draft</span>` : ""}
+          <span class="my-pr-badge rel-${esc(pr.relationship)}">${esc(relLabel(pr.relationship))}</span>
+          <span class="my-pr-badge status-${esc(pr.status)}">${esc(pr.status)}</span>
+          ${pr.draft ? `<span class="my-pr-badge my-pr-draft">draft</span>` : ""}
         </span>
         <span class="my-pr-title">${esc(pr.title)}</span>
       </button>`
     )
     .join("");
-  panel.querySelectorAll(".my-pr-item").forEach((btn) => {
+  list.querySelectorAll(".my-pr-item").forEach((btn) => {
     btn.addEventListener("click", () => {
       $("myPrsPanel").hidden = true;
       openPr(btn.dataset.ref);

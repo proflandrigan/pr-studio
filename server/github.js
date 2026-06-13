@@ -180,11 +180,54 @@ export function repoFromUrl(repositoryUrl) {
   return m ? { owner: m[1], repo: m[2] } : null;
 }
 
-// Open PRs the authenticated user is involved in (author/assignee/reviewer/
-// commenter/mentioned), most-recently-updated first. Requires a token — the
-// `involves:@me` qualifier needs an authenticated identity — so without one we
-// throw a 401 the route layer surfaces as JSON. Capped at 50; pagination is out
-// of scope.
+// Merge the three relationship searches into one deduped, tagged list.
+// Pure (no I/O) so it's unit-testable. Each arg is an array of raw GitHub
+// search-issues items. Relationship is mutually exclusive, priority
+// authored > review-requested > involved. Status is open|closed|merged.
+export function tagPullRequests({ involves = [], authored = [], reviewRequested = [] }) {
+  const authoredIds = new Set(authored.map((i) => i.id));
+  const reviewIds = new Set(reviewRequested.map((i) => i.id));
+  const byId = new Map();
+  // Order matters only for first-wins dedupe; tagging is by id-set membership
+  // so it's independent of which array an item came from.
+  for (const item of [...authored, ...reviewRequested, ...involves]) {
+    if (byId.has(item.id)) continue;
+    const repo = repoFromUrl(item.repository_url);
+    if (!repo) continue;
+    const relationship = authoredIds.has(item.id)
+      ? "authored"
+      : reviewIds.has(item.id)
+      ? "review-requested"
+      : "involved";
+    const status =
+      item.pull_request && item.pull_request.merged_at ? "merged" : item.state; // open|closed
+    byId.set(item.id, {
+      owner: repo.owner,
+      repo: repo.repo,
+      number: item.number,
+      title: item.title,
+      state: item.state,
+      status,
+      relationship,
+      draft: Boolean(item.draft),
+      author: item.user ? item.user.login : "unknown",
+      url: item.html_url,
+      updatedAt: item.updated_at,
+    });
+  }
+  return [...byId.values()].sort(
+    (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
+  );
+}
+
+// PRs the authenticated user is involved in across all states
+// (open/closed/merged), tagged with their relationship (authored/
+// review-requested/involved) and status (open/closed/merged), most-recently-
+// updated first. Requires a token — the `@me` qualifiers need an
+// authenticated identity — so without one we throw a 401 the route layer
+// surfaces as JSON. Unions three searches (author/review-requested/involves)
+// since `involves:@me` alone misses review-requested PRs. Capped at 100;
+// pagination beyond that is out of scope.
 export async function listMyPullRequests() {
   if (!resolveToken()) {
     throw Object.assign(
@@ -192,25 +235,19 @@ export async function listMyPullRequests() {
       { status: 401 }
     );
   }
-  const q = encodeURIComponent("is:pr is:open involves:@me");
-  const data = await gh(`/search/issues?q=${q}&sort=updated&order=desc&per_page=50`);
-  return (data.items || [])
-    .map((item) => {
-      const repo = repoFromUrl(item.repository_url);
-      if (!repo) return null;
-      return {
-        owner: repo.owner,
-        repo: repo.repo,
-        number: item.number,
-        title: item.title,
-        state: item.state,           // "open"
-        draft: Boolean(item.draft),
-        author: item.user ? item.user.login : "unknown",
-        url: item.html_url,
-        updatedAt: item.updated_at,
-      };
-    })
-    .filter(Boolean);
+  const search = async (qualifier) => {
+    const q = encodeURIComponent(`is:pr ${qualifier}`);
+    const data = await gh(
+      `/search/issues?q=${q}&sort=updated&order=desc&per_page=100`
+    );
+    return data.items || [];
+  };
+  const [involves, authored, reviewRequested] = await Promise.all([
+    search("involves:@me"),
+    search("author:@me"),
+    search("review-requested:@me"),
+  ]);
+  return tagPullRequests({ involves, authored, reviewRequested }).slice(0, 100);
 }
 
 // Resolution and outdated state lives on the review *thread*, not the comment,

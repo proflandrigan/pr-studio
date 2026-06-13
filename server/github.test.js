@@ -1,0 +1,87 @@
+import { test } from "node:test";
+import assert from "node:assert";
+import { tagPullRequests } from "./github.js";
+
+function item(id, opts = {}) {
+  return {
+    id,
+    number: opts.number ?? id,
+    title: opts.title ?? `PR ${id}`,
+    state: opts.state ?? "open",
+    draft: opts.draft ?? false,
+    user: { login: opts.author ?? "octocat" },
+    html_url: `https://github.com/o/r/pull/${opts.number ?? id}`,
+    updated_at: opts.updatedAt ?? "2026-01-01T00:00:00Z",
+    repository_url: opts.repositoryUrl ?? "https://api.github.com/repos/o/r",
+    pull_request: { merged_at: opts.mergedAt ?? null },
+  };
+}
+
+test("relationship priority: authored beats review-requested beats involved", () => {
+  const involves = [item(1), item(2), item(3)];
+  const authored = [item(1)];
+  const reviewRequested = [item(1), item(2)];
+
+  const result = tagPullRequests({ involves, authored, reviewRequested });
+
+  const pr1 = result.find((p) => p.number === 1);
+  const pr2 = result.find((p) => p.number === 2);
+  const pr3 = result.find((p) => p.number === 3);
+
+  assert.strictEqual(pr1.relationship, "authored");
+  assert.strictEqual(pr2.relationship, "review-requested");
+  assert.strictEqual(pr3.relationship, "involved");
+});
+
+test("dedupes by id across the three search arrays", () => {
+  const involves = [item(1)];
+  const authored = [item(1)];
+
+  const result = tagPullRequests({ involves, authored, reviewRequested: [] });
+
+  assert.strictEqual(result.filter((p) => p.number === 1).length, 1);
+});
+
+test("status: merged when pull_request.merged_at is set, else state", () => {
+  const involves = [
+    item(1, { state: "closed", mergedAt: "2026-02-01T00:00:00Z" }),
+    item(2, { state: "closed" }),
+    item(3, { state: "open" }),
+  ];
+
+  const result = tagPullRequests({ involves, authored: [], reviewRequested: [] });
+
+  assert.strictEqual(result.find((p) => p.number === 1).status, "merged");
+  assert.strictEqual(result.find((p) => p.number === 2).status, "closed");
+  assert.strictEqual(result.find((p) => p.number === 3).status, "open");
+});
+
+test("sorts by updatedAt descending", () => {
+  const involves = [
+    item(1, { updatedAt: "2026-01-01T00:00:00Z" }),
+    item(2, { updatedAt: "2026-03-01T00:00:00Z" }),
+    item(3, { updatedAt: "2026-02-01T00:00:00Z" }),
+  ];
+
+  const result = tagPullRequests({ involves, authored: [], reviewRequested: [] });
+
+  const updatedAts = result.map((p) => p.updatedAt);
+  const sorted = [...updatedAts].sort().reverse();
+  assert.deepStrictEqual(updatedAts, sorted);
+});
+
+test("drops items whose repository_url does not parse", () => {
+  const involves = [item(1), item(2, { repositoryUrl: "not-a-url" })];
+
+  const result = tagPullRequests({ involves, authored: [], reviewRequested: [] });
+
+  assert.strictEqual(result.length, 1);
+  assert.ok(!result.some((p) => p.number === 2));
+});
+
+test("missing arrays default to empty (no throw)", () => {
+  const result = tagPullRequests({ involves: [item(1)] });
+
+  assert.strictEqual(result.length, 1);
+  assert.strictEqual(result[0].relationship, "involved");
+});
