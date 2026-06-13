@@ -325,6 +325,102 @@ body {
   text-overflow: ellipsis;
 }
 
+/* ---------- My PRs filter bar ---------- */
+.my-prs-filters {
+  /* Cancel the panel's 6px padding so the bar spans full width and can stick
+     flush to the top of the scrolling panel. */
+  position: sticky;
+  top: 0;
+  margin: -6px -6px 6px;
+  padding: 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 1;
+}
+
+.my-prs-filter-text {
+  width: 100%;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.my-prs-filter-text::placeholder {
+  color: var(--muted-dim);
+}
+.my-prs-filter-text:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.my-prs-filter-selects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.my-prs-filter-select {
+  flex: 1 1 auto;
+  min-width: 90px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 6px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+.my-prs-filter-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Let the badges wrap under the repo label rather than overflow the row. */
+.my-pr-item-top {
+  flex-wrap: wrap;
+}
+
+/* ---------- My PRs item badges ---------- */
+.my-pr-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.my-pr-badge.status-open {
+  color: var(--add);
+  border-color: rgba(95, 168, 115, 0.4);
+}
+.my-pr-badge.status-closed {
+  color: var(--del);
+  border-color: rgba(207, 101, 117, 0.4);
+}
+.my-pr-badge.status-merged {
+  color: #a371f7;
+  border-color: rgba(163, 113, 247, 0.4);
+}
+.my-pr-badge.rel-authored {
+  color: var(--accent);
+  border-color: rgba(230, 169, 63, 0.4);
+}
+.my-pr-badge.rel-review-requested {
+  color: #6c9fed;
+  border-color: rgba(108, 159, 237, 0.4);
+}
+.my-pr-badge.rel-involved {
+  color: var(--muted);
+}
+
 /* ---------- Tabs ---------- */
 .tabs {
   display: flex;
