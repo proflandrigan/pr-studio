@@ -2409,6 +2409,26 @@ async function runChecksFlow() {
   }
 }
 
+// Build a "Current PR" preamble identifying the PR the user has open, so the
+// agent can pull it up itself (e.g. `gh pr view owner/repo#123`) even when no
+// local checkout is set. Identity only — title + ref + URL; the agent fetches
+// any detail it needs. Returns "" when no tab is active. Prepended to the FIRST
+// turn of a conversation only (later turns resume a session that already has
+// this context — see runAgent()).
+function buildPrContext() {
+  const tab = state.active ? state.tabs.find((t) => t.key === state.active) : null;
+  if (!tab) return "";
+  const ref = `${tab.owner}/${tab.repo}#${tab.number}`;
+  const url = tab.data && tab.data.url ? tab.data.url : "";
+  return (
+    "[Current PR — the user has this PR open.]\n" +
+    `${ref}  "${tab.title}"\n` +
+    (url ? `${url}\n` : "") +
+    `Use \`gh pr view ${ref}\` for details.\n` +
+    "[End current PR]\n\n"
+  );
+}
+
 // Build a "Pinned context" preamble from the active tab's pins so the agent
 // knows exactly which lines the user is pointing at, quoting the code verbatim.
 // Returns "" when there are no pins.
@@ -2459,7 +2479,6 @@ async function runAgent() {
   const input = $("agentInput");
   const prompt = input.value.trim();
   if (!prompt) return;
-  const fullPrompt = buildPinnedContext() + prompt;
 
   consoleEl.classList.remove("collapsed");
   const repoPath = repoPathEl.value.trim();
@@ -2476,6 +2495,12 @@ async function runAgent() {
   const convo = key ? conversationFor(key) : null;
   const sessionId = convo ? convo.sessionId : undefined;
   const resume = convo ? convo.started : false;
+
+  // PR identity is injected only on the first turn — later turns resume a
+  // Claude Code session that already carries it. Pinned context stays per-turn
+  // because the user's pins change message to message.
+  const fullPrompt =
+    (resume ? "" : buildPrContext()) + buildPinnedContext() + prompt;
 
   // Record + echo the user's turn — store what they actually typed, not the
   // pinned-context plumbing that gets prepended for the agent.

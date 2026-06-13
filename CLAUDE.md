@@ -108,6 +108,18 @@ replays its in-progress output. Chat is **turn-based** — headless
 answers. The **Clear** button only wipes the screen; **New chat** resets the
 thread.
 
+**Prompt preamble.** `runAgent()` assembles the text sent to the agent as
+`(resume ? "" : buildPrContext()) + buildPinnedContext() + prompt` (the stored
+user turn keeps the raw typed `prompt`, not this expanded form). `buildPrContext()`
+emits an identity-only **"Current PR"** block (`owner/repo#number`, title, URL,
+plus a nudge to run `gh pr view`) so the agent knows which PR is open and can pull
+it up itself even with no local checkout — without it a checkout-less turn lands in
+`tmpdir()` with no way to identify the PR. It's prepended **only on the first turn**
+(`resume === false`); later turns resume a Claude Code session that already carries
+that context, so re-sending it would just waste tokens. `buildPinnedContext()`, by
+contrast, is sent **every turn** because the user's pinned diff lines change message
+to message.
+
 ### Request flow
 
 Browser `fetch` → `/api/*` in `index.js` → `github.js` (GitHub data),
