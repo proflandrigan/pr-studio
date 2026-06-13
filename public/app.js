@@ -157,6 +157,14 @@ async function init() {
     statusEl.title = "Server unreachable";
   }
 
+  // Capture the server's boot id immediately, before any branch that might
+  // persist(). On a brand-new install `saved` is null so the restore block
+  // below is skipped — if we only set state.bootId in there, the first chat
+  // would persist bootId:null and the next plain reload would see a mismatch
+  // (null vs the real id) and wrongly wipe the conversation. Seeding it here
+  // keeps the first reload a no-op restore.
+  state.bootId = (healthInfo && healthInfo.bootId) || null;
+
   const saved = loadPersisted();
   if (saved) {
     state.repoPaths = saved.repoPaths || {};
@@ -171,12 +179,14 @@ async function init() {
     // restore verbatim, keeping sessionId/started so a thread can resume. If we
     // couldn't reach the server (no bootId), preserve what's stored rather than
     // destroying the user's chats.
-    const serverBootId = healthInfo && healthInfo.bootId;
+    const serverBootId = state.bootId;
     if (!serverBootId || saved.bootId === serverBootId) {
       state.conversations = saved.conversations || {};
     } else {
       state.conversations = {};
     }
+    // If the server was unreachable, fall back to the last id we stored so a
+    // later successful load can still tell a restart from a plain reload.
     state.bootId = serverBootId || saved.bootId || null;
     state.showResolved = Boolean(saved.showResolved);
     state.done = saved.done || {};
@@ -2584,20 +2594,28 @@ async function runAgent() {
     // message in this tab can resume it instead of starting fresh.
     if (convo) convo.started = true;
   } catch (e) {
-    if (e.name !== "AbortError") {
+    if (e.name === "AbortError") {
+      // Stop was clicked. The request was dispatched and the child launched, so
+      // the session now exists on disk — mark it started so the next message
+      // resumes it. Reusing --session-id against an existing session would error
+      // with no self-heal; --resume against a vanished one falls back cleanly.
+      if (convo) convo.started = true;
+    } else {
       const msg = `\n⚠ ${e.message}\n`;
       agentText += msg;
       emit(key, msg, "err");
     }
   } finally {
     // Persist the agent's reply as one transcript turn so it survives reloads
-    // and tab switches, then clear the in-progress buffer.
-    if (convo) {
+    // and tab switches, then clear the in-progress buffer. Skip an empty reply
+    // (e.g. Stop clicked before any text streamed) so no blank bubble lingers.
+    if (convo && agentText) {
       convo.turns.push({ role: "agent", text: agentText });
       persist();
     }
     if (state.active === key && liveRun && liveRun.el) {
-      finalizeAgentBubble(liveRun.el, agentText);
+      if (agentText) finalizeAgentBubble(liveRun.el, agentText);
+      else liveRun.el.closest(".message")?.remove(); // drop the empty bubble
     }
     liveRun = null;
     agentActive = false;
