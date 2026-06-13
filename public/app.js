@@ -638,10 +638,10 @@ async function loadComments(key) {
 // without refetching. Reset each time the panel loads.
 let allMyPrs = [];
 
-// Static filter-bar markup for the My PRs panel. Controls are wired in
-// Task 04 (applyPrFilters); here they're rendered inert. The repo <select>
-// starts with only the "All repos" option — it's populated from the fetched
-// set when the list loads.
+// Static filter-bar markup for the My PRs panel. The controls are wired via
+// event delegation on the panel in wireEvents(), which re-runs the client-side
+// filter on input/change. The repo <select> starts with only the "All repos"
+// option — it's populated from the fetched set when the list loads.
 function prFilterBarHtml() {
   return `
     <div class="my-prs-filters" id="myPrsFilters">
@@ -721,6 +721,9 @@ async function loadMyPrs() {
   panel.innerHTML = `${prFilterBarHtml()}<div class="my-prs-list" id="myPrsList"></div>`;
   const list = $("myPrsList");
   list.innerHTML = `<div class="my-prs-state">Loading…</div>`;
+  // Clear the previous load's set up front so a failed (re)load can't leave
+  // stale PRs that the filter controls would surface over the error message.
+  allMyPrs = [];
   try {
     const res = await fetch("/api/my-prs");
     const body = await res.json();
