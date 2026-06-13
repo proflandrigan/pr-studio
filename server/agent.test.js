@@ -3,36 +3,22 @@ import assert from "node:assert";
 import { tmpdir } from "node:os";
 import { extractJson, buildBreakdownPrompt, buildAgentArgs, formatEvent, resolveAgentCwd, isSessionNotFoundError } from "./agent.js";
 
-test("resolveAgentCwd falls back to a temp dir for review with no path", () => {
-  const r = resolveAgentCwd({ repoPath: "", mode: "review" });
+test("resolveAgentCwd falls back to a temp dir with no path", () => {
+  const r = resolveAgentCwd({ repoPath: "" });
   assert.strictEqual(r.cwd, tmpdir());
   assert.strictEqual(r.error, undefined);
 });
 
-test("resolveAgentCwd falls back to a temp dir for review with a bogus path", () => {
-  const r = resolveAgentCwd({ repoPath: "/no/such/dir/here", mode: "review" });
+test("resolveAgentCwd falls back to a temp dir with a bogus path", () => {
+  const r = resolveAgentCwd({ repoPath: "/no/such/dir/here" });
   assert.strictEqual(r.cwd, tmpdir());
   assert.strictEqual(r.error, undefined);
 });
 
-test("resolveAgentCwd errors for fix mode with no valid checkout", () => {
-  const empty = resolveAgentCwd({ repoPath: "", mode: "fix" });
-  assert.strictEqual(empty.cwd, undefined);
-  assert.match(empty.error, /Repo path not found/);
-
-  const bogus = resolveAgentCwd({ repoPath: "/no/such/dir/here", mode: "fix" });
-  assert.strictEqual(bogus.cwd, undefined);
-  assert.match(bogus.error, /Repo path not found/);
-});
-
-test("resolveAgentCwd uses a real directory in any mode", () => {
-  const review = resolveAgentCwd({ repoPath: process.cwd(), mode: "review" });
-  assert.strictEqual(review.cwd, process.cwd());
-  assert.strictEqual(review.error, undefined);
-
-  const fix = resolveAgentCwd({ repoPath: process.cwd(), mode: "fix" });
-  assert.strictEqual(fix.cwd, process.cwd());
-  assert.strictEqual(fix.error, undefined);
+test("resolveAgentCwd uses a real directory", () => {
+  const r = resolveAgentCwd({ repoPath: process.cwd() });
+  assert.strictEqual(r.cwd, process.cwd());
+  assert.strictEqual(r.error, undefined);
 });
 
 test("extractJson parses a plain JSON array string", () => {
@@ -47,37 +33,40 @@ test("extractJson parses a ```json fenced array", () => {
 });
 
 test("buildAgentArgs omits session flags when no sessionId", () => {
-  const args = buildAgentArgs({ prompt: "hi", mode: "review" });
+  const args = buildAgentArgs({ prompt: "hi" });
   assert.ok(args.includes("-p"));
   assert.ok(args.includes("hi"));
   assert.ok(args.includes("--output-format"));
   assert.ok(args.includes("stream-json"));
   assert.ok(!args.includes("--session-id"));
   assert.ok(!args.includes("--resume"));
-  assert.ok(args.includes("--disallowedTools"));
+});
+
+test("buildAgentArgs grants the full edit-capable tool set", () => {
+  const args = buildAgentArgs({ prompt: "hi" });
+  assert.ok(args.includes("--permission-mode"));
+  assert.ok(args.includes("acceptEdits"));
+  assert.ok(args.includes("Write"));
+  assert.ok(args.includes("Edit"));
+  assert.ok(args.includes("Bash"));
+  // No capability toggle anymore, so nothing is disallowed.
+  assert.ok(!args.includes("--disallowedTools"));
 });
 
 test("buildAgentArgs uses --session-id for a new session", () => {
-  const args = buildAgentArgs({ prompt: "hi", mode: "fix", sessionId: "abc-123" });
+  const args = buildAgentArgs({ prompt: "hi", sessionId: "abc-123" });
   const i = args.indexOf("--session-id");
   assert.ok(i !== -1);
   assert.strictEqual(args[i + 1], "abc-123");
   assert.ok(!args.includes("--resume"));
-  assert.ok(args.includes("--permission-mode"));
-  assert.ok(args.includes("acceptEdits"));
 });
 
 test("buildAgentArgs uses --resume for a continued session", () => {
-  const args = buildAgentArgs({ prompt: "hi", mode: "fix", sessionId: "abc-123", resume: true });
+  const args = buildAgentArgs({ prompt: "hi", sessionId: "abc-123", resume: true });
   const i = args.indexOf("--resume");
   assert.ok(i !== -1);
   assert.strictEqual(args[i + 1], "abc-123");
   assert.ok(!args.includes("--session-id"));
-});
-
-test("buildAgentArgs falls back to review flags for unknown mode", () => {
-  const args = buildAgentArgs({ prompt: "hi", mode: "nonexistent" });
-  assert.ok(args.includes("--disallowedTools"));
 });
 
 test("extractJson parses an array embedded in surrounding prose", () => {

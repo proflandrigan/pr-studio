@@ -9,31 +9,18 @@ import { tmpdir } from "node:os";
 // Which Claude Code binary to call. Override with CLAUDE_BIN if it's not on PATH.
 export const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 
-// Permission posture for unattended runs. "review" is read-only; "fix" lets the
-// agent edit files. Defaults stay conservative.
-const MODES = {
-  review: ["--allowedTools", "Read", "Glob", "Grep", "Bash(git*)", "--disallowedTools", "Write", "Edit"],
-  fix: ["--permission-mode", "acceptEdits", "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-};
+// Permission posture for the agent. It runs inside the user's checkout and is
+// granted the full tool set — read, edit, and run commands — so it can carry
+// out whatever the user asks without a capability toggle getting in the way.
+// `--permission-mode acceptEdits` lets edits land without per-edit prompts
+// (headless mode can't prompt anyway). Commits/pushes stay manual.
+const AGENT_TOOLS = ["--permission-mode", "acceptEdits", "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep", "Bash"];
 
-// Descriptive info for the UI, derived from MODES so there's one source of truth
-// for what each mode can and can't do.
-export const MODE_INFO = {
-  review: {
-    label: "review (read-only)",
-    description: "Read-only — cannot edit files",
-    allowed: ["Read", "Glob", "Grep", "Bash(git*)"],
-    disallowed: ["Write", "Edit"],
-  },
-  fix: {
-    label: "fix (allows edits)",
-    description: "Can edit files + run bash",
-    allowed: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-    disallowed: [],
-  },
-};
+// Read-only tool set used only for the internal PR-breakdown task: it reads the
+// checkout to emit JSON and must never edit files.
+const READONLY_TOOLS = ["--allowedTools", "Read", "Glob", "Grep", "Bash(git*)", "--disallowedTools", "Write", "Edit"];
 
-export function buildAgentArgs({ prompt, mode, sessionId, resume }) {
+export function buildAgentArgs({ prompt, sessionId, resume }) {
   const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
   if (sessionId) {
     if (resume) {
@@ -42,7 +29,7 @@ export function buildAgentArgs({ prompt, mode, sessionId, resume }) {
       args.push("--session-id", sessionId);
     }
   }
-  args.push(...(MODES[mode] || MODES.review));
+  args.push(...AGENT_TOOLS);
   return args;
 }
 
@@ -56,31 +43,24 @@ export function isSessionNotFoundError(text) {
   return t.includes("no conversation found") && t.includes("session id");
 }
 
-// Decide the cwd the agent runs in. fix mode must have a real checkout (it edits
-// files); review mode can answer from the PR context + pinned code in the prompt,
-// so a missing/invalid path falls back to a neutral temp dir instead of erroring —
-// we only demand a checkout when the user is asking for changes/fixes.
-export function resolveAgentCwd({ repoPath, mode = "review" }) {
+// Decide the cwd the agent runs in. A valid checkout is used directly so the
+// agent can read and edit the PR's files. With no usable path it falls back to a
+// neutral temp dir instead of erroring, so the agent can still answer questions
+// from the PR context + pinned code in the prompt; edit requests there simply
+// have nothing to act on, and the agent says so.
+export function resolveAgentCwd({ repoPath }) {
   const valid = repoPath && existsSync(repoPath) && statSync(repoPath).isDirectory();
   if (valid) return { cwd: repoPath };
-  if (mode === "fix") {
-    return { error: `Repo path not found: ${repoPath || "(empty)"}\nSet it to a local checkout of the PR's repository.` };
-  }
   return { cwd: tmpdir() };
 }
 
-export function runAgent({ prompt, repoPath, mode = "review", sessionId, resume, onData, onError, onClose }) {
+export function runAgent({ prompt, repoPath, sessionId, resume, onData, onError, onClose }) {
   if (!prompt || !prompt.trim()) {
     onError("No task provided.");
     onClose(1);
     return null;
   }
-  const { cwd, error } = resolveAgentCwd({ repoPath, mode });
-  if (error) {
-    onError(error);
-    onClose(1);
-    return null;
-  }
+  const { cwd } = resolveAgentCwd({ repoPath });
 
   // We may relaunch once: a `--resume` turn can fail because the session no
   // longer exists (server restarted, repo path changed, session store expired).
@@ -99,7 +79,7 @@ export function runAgent({ prompt, repoPath, mode = "review", sessionId, resume,
   };
 
   function launch({ resume: useResume }) {
-    const args = buildAgentArgs({ prompt, mode, sessionId, resume: useResume });
+    const args = buildAgentArgs({ prompt, sessionId, resume: useResume });
 
     let child;
     try {
@@ -269,7 +249,7 @@ export function runBreakdown({ files, title, repoPath }) {
     }
 
     const prompt = buildBreakdownPrompt({ title, files });
-    const args = ["-p", prompt, "--output-format", "json", ...MODES.review];
+    const args = ["-p", prompt, "--output-format", "json", ...READONLY_TOOLS];
 
     let child;
     try {

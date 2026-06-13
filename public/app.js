@@ -7,7 +7,6 @@ const state = {
   active: null,
   repoPaths: {}, // key -> local path
   checkCmds: {}, // repoPath -> command override
-  agentMode: "review",
   showResolved: false, // view toggle: include resolved inline threads in the diff
   done: {}, // { [prKey]: ["inline:<id>", "convo:<id>", ...] } — local triage, persisted
   hideDone: false, // view toggle: hide locally-done comments
@@ -94,7 +93,6 @@ function persist() {
     active: state.active,
     repoPaths: state.repoPaths,
     checkCmds: state.checkCmds,
-    agentMode: state.agentMode,
     showResolved: state.showResolved,
     done: state.done,
     hideDone: state.hideDone,
@@ -126,10 +124,7 @@ const consoleEl = $("console");
 const consoleOut = $("consoleOut");
 const repoPathEl = $("repoPath");
 const checkCmdEl = $("checkCmd");
-const agentModeEl = $("agentMode");
-const modeChipEl = $("modeChip");
 
-let modeInfo = null;
 let healthInfo = null;
 
 // Set by loadComments() when the selected file renders asynchronously (markdown/
@@ -152,13 +147,6 @@ async function init() {
     statusEl.title = "Server unreachable";
   }
 
-  try {
-    modeInfo = await fetch("/api/agent/modes").then((r) => r.json());
-  } catch {
-    modeInfo = null;
-  }
-  renderModeChip();
-
   const saved = loadPersisted();
   if (saved) {
     state.repoPaths = saved.repoPaths || {};
@@ -177,13 +165,10 @@ async function init() {
       convo.started = false;
       convo.sessionId = crypto.randomUUID();
     }
-    state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
     state.done = saved.done || {};
     state.hideDone = Boolean(saved.hideDone);
     state.consoleHeight = saved.consoleHeight || null;
-    agentModeEl.value = state.agentMode;
-    renderModeChip();
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
     }
@@ -270,23 +255,6 @@ function renderPins() {
     });
     host.appendChild(chip);
   }
-}
-
-function renderModeChip() {
-  if (!modeChipEl) return;
-  const mode = agentModeEl.value || state.agentMode || "review";
-  const info = modeInfo && modeInfo[mode];
-  modeChipEl.classList.remove("readonly", "edit");
-  if (!info) {
-    modeChipEl.textContent = "";
-    return;
-  }
-  modeChipEl.classList.add(mode === "fix" ? "edit" : "readonly");
-  const tools = info.allowed.join(", ");
-  modeChipEl.textContent = `${info.description} — ${tools}`;
-  modeChipEl.title =
-    info.description +
-    (info.disallowed.length ? ` (disallowed: ${info.disallowed.join(", ")})` : "");
 }
 
 // ---------- Split-pane helpers ----------
@@ -450,12 +418,6 @@ function wireEvents() {
     consoleEl.classList.toggle("collapsed");
   });
 
-  agentModeEl.addEventListener("change", () => {
-    state.agentMode = agentModeEl.value;
-    renderModeChip();
-    persist();
-  });
-
   $("agentStop").addEventListener("click", () => {
     if (agentAbort) agentAbort.abort();
   });
@@ -468,12 +430,6 @@ function wireEvents() {
       return;
     }
     if (agentActive) return; // a turn is already streaming; don't double-fire
-    // Addressing comments means editing — force fix mode (mirror the mode
-    // <select> change handler's side-effects) before kicking off.
-    agentModeEl.value = "fix";
-    state.agentMode = "fix";
-    renderModeChip();
-    persist();
     $("agentInput").value = buildCommentReviewPrompt(tab.key);
     runAgent();
   });
@@ -2318,8 +2274,8 @@ async function resolveThread(tab, cm) {
 // ---------- Agent ----------
 // Build the task prompt that drives the pr-comment-review skill against a
 // specific PR in ORCHESTRATED mode (triage → one plan approval → implement
-// items one at a time). The "Address PR comments" button forces fix mode, so
-// the prompt always assumes edits are allowed.
+// items one at a time). The agent always has edit permissions, so the prompt
+// assumes edits are allowed.
 function buildCommentReviewPrompt(prRef) {
   return (
     `Use the pr-comment-review skill in ORCHESTRATED mode to address the review ` +
@@ -2327,7 +2283,7 @@ function buildCommentReviewPrompt(prRef) {
     `straight to orchestrated: triage every thread into a categorized fix plan, ` +
     `present the plan and wait for my approval, then implement the actionable ` +
     `items one at a time, reading the real code first and QA-ing each change. ` +
-    `Mode is \`fix\` — you may apply edits.`
+    `You may apply edits.`
   );
 }
 
@@ -2549,7 +2505,7 @@ async function runAgent() {
     const res = await fetch("/api/agent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: fullPrompt, repoPath, mode: agentModeEl.value, sessionId, resume }),
+      body: JSON.stringify({ prompt: fullPrompt, repoPath, sessionId, resume }),
       signal: agentAbort.signal,
     });
     const reader = res.body.getReader();

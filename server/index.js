@@ -23,7 +23,7 @@ import {
   hasToken,
   tokenSource,
 } from "./github.js";
-import { runAgent, runBreakdown, MODE_INFO, CLAUDE_BIN } from "./agent.js";
+import { runAgent, runBreakdown, CLAUDE_BIN } from "./agent.js";
 import { detectCheckCommand, runChecks } from "./checks.js";
 import { normalizeChunks } from "./breakdown.js";
 
@@ -61,10 +61,6 @@ app.get("/api/health", (req, res) => {
     defaultRepoPath: process.env.DEFAULT_REPO_PATH || null,
     claudeAvailable: checkClaudeAvailable(),
   });
-});
-
-app.get("/api/agent/modes", (req, res) => {
-  res.json(MODE_INFO);
 });
 
 app.get(
@@ -156,7 +152,7 @@ app.post(
 
 // Streams Claude Code output back as plain text chunks.
 app.post("/api/agent", (req, res) => {
-  const { prompt, repoPath, mode, sessionId, resume } = req.body || {};
+  const { prompt, repoPath, sessionId, resume } = req.body || {};
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
@@ -164,7 +160,6 @@ app.post("/api/agent", (req, res) => {
   const child = runAgent({
     prompt,
     repoPath: repoPath || process.env.DEFAULT_REPO_PATH,
-    mode,
     sessionId,
     resume,
     onData: (text) => res.write(text),

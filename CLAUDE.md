@@ -66,14 +66,18 @@ Four backend modules, each a focused concern, wired together in `index.js`:
   `GET /api/checks/detect` and the streaming `POST /api/checks/run` (the second
   text/plain streaming endpoint besides `/api/agent`).
 
-**Permission modes** (`MODES` in `agent.js`) are the core safety boundary:
-- `review` — read-only: `--allowedTools Read Glob Grep Bash(git*)`, Write/Edit
-  explicitly disallowed.
-- `fix` — `--permission-mode acceptEdits` with Write/Edit/full Bash allowed.
+**Agent capability** is governed by `AGENT_TOOLS` in `agent.js` — there is no
+review/fix toggle. The chat agent always gets the full, edit-capable tool set
+(`--permission-mode acceptEdits` with Read/Write/Edit/Glob/Grep/full Bash) so it
+can carry out whatever the user asks. A separate `READONLY_TOOLS` set
+(`Read Glob Grep Bash(git*)`, Write/Edit disallowed) is used only by the internal
+PR-breakdown task (`runBreakdown`), which just reads the checkout to emit JSON.
 
-When changing what the agent can do, edit `MODES` — this is the single place that
-governs agent capability. The agent always runs in the user's checkout; commits
-and pushes stay manual (the tool never commits for the user).
+When changing what the chat agent can do, edit `AGENT_TOOLS` — this is the single
+place that governs its capability. `resolveAgentCwd` runs the agent in the user's
+checkout when the repo path is valid, and falls back to a temp dir otherwise so
+question-only turns still work without a checkout. Commits and pushes stay manual
+(the tool never commits for the user).
 
 ### Frontend (`public/app.js`, vanilla JS, no framework)
 
@@ -119,4 +123,4 @@ agent.
 
 Note the boundary: checks are **not** run by the Claude agent. The agent only
 edits files; `runChecks()` in `checks.js` spawns the command directly via a shell
-from the server, outside the agent's `MODES` sandbox. Exit code 0 = pass.
+from the server, outside the agent's tool sandbox. Exit code 0 = pass.

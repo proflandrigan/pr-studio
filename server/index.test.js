@@ -26,19 +26,6 @@ test("GET /api/health returns expected shape", async () => {
   assert.strictEqual(typeof body.claudeAvailable, "boolean");
 });
 
-test("GET /api/agent/modes returns expected mode info shape", async () => {
-  const res = await fetch(`${baseUrl}/api/agent/modes`);
-  assert.strictEqual(res.status, 200);
-  const body = await res.json();
-  for (const mode of ["review", "fix"]) {
-    assert.ok(body[mode], `expected ${mode} in mode info`);
-    assert.strictEqual(typeof body[mode].label, "string");
-    assert.strictEqual(typeof body[mode].description, "string");
-    assert.ok(Array.isArray(body[mode].allowed));
-    assert.ok(Array.isArray(body[mode].disallowed));
-  }
-});
-
 test("parsePrRef parses a full PR URL", () => {
   const ref = parsePrRef("https://github.com/octocat/hello-world/pull/42");
   assert.deepStrictEqual(ref, { owner: "octocat", repo: "hello-world", number: 42 });
