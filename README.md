@@ -17,13 +17,13 @@ and signed in (`claude` on your PATH).
 Run it without installing:
 
 ```bash
-GITHUB_TOKEN=ghp_xxx npx pr-studio
+GITHUB_TOKEN=ghp_xxx npx @proflandrigan/pr-studio
 ```
 
 Or install globally:
 
 ```bash
-npm install -g pr-studio
+npm install -g @proflandrigan/pr-studio
 pr-studio
 ```
 

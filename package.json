@@ -1,10 +1,13 @@
 {
-  "name": "pr-studio",
+  "name": "@proflandrigan/pr-studio",
   "version": "0.1.0",
   "description": "A stripped-down PR review studio with Claude Code integration",
   "license": "MIT",
   "author": "proflandrigan",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "pr-studio": "server/index.js"
   },
