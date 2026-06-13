@@ -14,15 +14,32 @@ You need [Node.js](https://nodejs.org) 20.6+ and, for the agent features,
 [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) installed
 and signed in (`claude` on your PATH).
 
+Run it without installing:
+
 ```bash
-git clone <your-repo-url> pr-studio
+GITHUB_TOKEN=ghp_xxx npx @proflandrigan/pr-studio
+```
+
+Or install globally:
+
+```bash
+npm install -g @proflandrigan/pr-studio
+pr-studio
+```
+
+Either way it reads config from a `.env` file in the current directory or from
+the real environment (see [Configure](#configure)). Open
+<http://localhost:4317>.
+
+### From a clone
+
+```bash
+git clone https://github.com/proflandrigan/pr-studio.git
 cd pr-studio
 npm install
 cp .env.example .env     # then add your GitHub token
 npm start
 ```
-
-Open <http://localhost:4317>.
 
 ## Configure
 
@@ -41,16 +58,16 @@ Edit `.env`:
 2. Click a file to expand its diff. Click any added or context line to leave an
    inline comment. Use the box at the bottom of a PR for a general comment.
 3. In the **Claude Code** console at the bottom, set the path to your local
-   checkout of that repo, pick a mode, and type a task:
-   - **review** — read-only. The agent can read, search, and run `git`, but not
-     edit files. Good for "summarize the risky changes in this PR."
-   - **fix** — the agent may edit files. Good for "address the review comments
-     in src/auth.js." Review its changes in your editor before committing.
+   checkout of that repo and type a task. The agent can read, search, run `git`,
+   and edit files, so it handles both "summarize the risky changes in this PR"
+   and "address the review comments in src/auth.js." Chat is turn-based: each
+   message runs to completion, and the agent "asks for input" by ending a turn
+   with a question your next message answers. **New chat** starts a fresh thread.
 
-The agent runs in *your* checkout, so after a `fix` run, `git diff` in that repo
+The agent runs in *your* checkout, so after it edits, `git diff` in that repo
 shows what it did. Pushing/committing stays in your hands.
 
-### Run checks after a fix
+### Run checks after an edit
 
 The console header has a **test/lint command** field next to the repo path.
 PR Studio auto-detects it from the checkout (your `package.json` `test`/`lint`
@@ -58,8 +75,9 @@ scripts, then `README`, then `CLAUDE.md`, then language markers like
 `pytest`/`cargo test`/`go test`); you can edit it, and your override is
 remembered per checkout. Click **Run checks** to run it and stream the output
 into the console — it finishes with a green "✓ Checks passed" or red
-"✗ Checks failed" banner. After a **fix**-mode agent run, checks run
-automatically, so "edited and tests green" lands in one place.
+"✗ Checks failed" banner. Checks run independently of the agent (the server
+spawns the command directly, not through Claude), so you can run them any time —
+including after an agent edit to confirm "edited and tests green" in one place.
 
 ## Add it to the macOS dock
 

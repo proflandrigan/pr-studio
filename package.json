@@ -1,15 +1,45 @@
 {
-  "name": "pr-studio",
+  "name": "@proflandrigan/pr-studio",
   "version": "0.1.0",
   "description": "A stripped-down PR review studio with Claude Code integration",
   "license": "MIT",
+  "author": "proflandrigan",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "pr-studio": "server/index.js"
+  },
+  "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
     "test": "node --test server/"
   },
+  "files": [
+    "server/",
+    "public/",
+    ".env.example",
+    "!server/**/*.test.js"
+  ],
+  "keywords": [
+    "pull-request",
+    "code-review",
+    "github",
+    "claude",
+    "claude-code",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/proflandrigan/pr-studio.git"
+  },
+  "homepage": "https://github.com/proflandrigan/pr-studio#readme",
+  "bugs": {
+    "url": "https://github.com/proflandrigan/pr-studio/issues"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.6"
   },
   "dependencies": {
     "express": "^4.19.2",
