@@ -7,17 +7,30 @@ const state = {
   active: null,
   repoPaths: {}, // key -> local path
   checkCmds: {}, // repoPath -> command override
-  agentMode: "review",
   showResolved: false, // view toggle: include resolved inline threads in the diff
   done: {}, // { [prKey]: ["inline:<id>", "convo:<id>", ...] } — local triage, persisted
   hideDone: false, // view toggle: hide locally-done comments
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
   pins: {}, // key -> [ { id, file, side, startLine, endLine, code } ]
-  conversations: {}, // key -> { sessionId, started, turns: [ { role, text } ] }
+  conversations: {}, // key -> { sessionId, started, open, turns: [ { role, text } ] }
+  consoleHeight: null, // px height of the agent console, persisted from drag-resize
+  bootId: null, // last-seen server boot id; a change across loads means npm start re-ran
 };
 
 function keyOf(o, r, n) {
   return `${o}/${r}#${n}`;
+}
+
+// ---------- Resizable console ----------
+const CONSOLE_MIN_H = 120;
+function consoleMaxH() {
+  return Math.round(window.innerHeight * 0.8);
+}
+function applyConsoleHeight(h) {
+  if (h == null) return;
+  const clamped = Math.max(CONSOLE_MIN_H, Math.min(h, consoleMaxH()));
+  state.consoleHeight = clamped;
+  consoleEl.style.setProperty("--console-height", clamped + "px");
 }
 
 // ---------- Pinned context ----------
@@ -37,16 +50,24 @@ function pinsFor(key) {
 function conversationFor(key) {
   if (!key) return null;
   if (!state.conversations[key]) {
-    state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, turns: [] };
+    state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, open: false, turns: [] };
   }
+  return state.conversations[key];
+}
+
+// Open a PR tab's chat: replace its conversation with a brand-new, OPEN
+// session (fresh session id, empty transcript). Used by the "Start Chat"
+// button shown while a tab's chat is closed, and reused by "New chat".
+function startChat(key) {
+  if (!key) return null;
+  state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, open: true, turns: [] };
+  persist();
   return state.conversations[key];
 }
 
 function resetConversation(key) {
   if (!key) return null;
-  state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, turns: [] };
-  persist();
-  return state.conversations[key];
+  return startChat(key);
 }
 
 function addPin(key, pin) {
@@ -81,13 +102,14 @@ function persist() {
     active: state.active,
     repoPaths: state.repoPaths,
     checkCmds: state.checkCmds,
-    agentMode: state.agentMode,
     showResolved: state.showResolved,
     done: state.done,
     hideDone: state.hideDone,
     breakdowns: state.breakdowns,
     pins: state.pins,
     conversations: state.conversations,
+    consoleHeight: state.consoleHeight,
+    bootId: state.bootId,
   };
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(slim));
@@ -112,10 +134,7 @@ const consoleEl = $("console");
 const consoleOut = $("consoleOut");
 const repoPathEl = $("repoPath");
 const checkCmdEl = $("checkCmd");
-const agentModeEl = $("agentMode");
-const modeChipEl = $("modeChip");
 
-let modeInfo = null;
 let healthInfo = null;
 
 // Set by loadComments() when the selected file renders asynchronously (markdown/
@@ -138,12 +157,13 @@ async function init() {
     statusEl.title = "Server unreachable";
   }
 
-  try {
-    modeInfo = await fetch("/api/agent/modes").then((r) => r.json());
-  } catch {
-    modeInfo = null;
-  }
-  renderModeChip();
+  // Capture the server's boot id immediately, before any branch that might
+  // persist(). On a brand-new install `saved` is null so the restore block
+  // below is skipped — if we only set state.bootId in there, the first chat
+  // would persist bootId:null and the next plain reload would see a mismatch
+  // (null vs the real id) and wrongly wipe the conversation. Seeding it here
+  // keeps the first reload a no-op restore.
+  state.bootId = (healthInfo && healthInfo.bootId) || null;
 
   const saved = loadPersisted();
   if (saved) {
@@ -151,13 +171,27 @@ async function init() {
     state.checkCmds = saved.checkCmds || {};
     state.breakdowns = saved.breakdowns || {};
     state.pins = saved.pins || {};
-    state.conversations = saved.conversations || {};
-    state.agentMode = saved.agentMode || "review";
+    // Decide whether to keep or wipe stored conversations based on the server's
+    // boot id (from /api/health). A changed bootId means the server process
+    // restarted — `npm start` was re-run — so every prior Claude Code session is
+    // gone: drop all conversations and let each PR tab open with a fresh, closed
+    // chat. On a plain reload (same bootId) the sessions still live on disk, so
+    // restore verbatim, keeping sessionId/started so a thread can resume. If we
+    // couldn't reach the server (no bootId), preserve what's stored rather than
+    // destroying the user's chats.
+    const serverBootId = state.bootId;
+    if (!serverBootId || saved.bootId === serverBootId) {
+      state.conversations = saved.conversations || {};
+    } else {
+      state.conversations = {};
+    }
+    // If the server was unreachable, fall back to the last id we stored so a
+    // later successful load can still tell a restart from a plain reload.
+    state.bootId = serverBootId || saved.bootId || null;
     state.showResolved = Boolean(saved.showResolved);
     state.done = saved.done || {};
     state.hideDone = Boolean(saved.hideDone);
-    agentModeEl.value = state.agentMode;
-    renderModeChip();
+    state.consoleHeight = saved.consoleHeight || null;
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
     }
@@ -167,6 +201,8 @@ async function init() {
       activate(state.tabs[0].key);
     }
   }
+
+  if (state.consoleHeight) applyConsoleHeight(state.consoleHeight);
 
   wireEvents();
   refreshCheckCmd();
@@ -218,6 +254,11 @@ function renderPins() {
   const host = document.getElementById("pinChips");
   if (!host) return;
   const pins = state.active ? pinsFor(state.active) : [];
+  const convo = state.active ? conversationFor(state.active) : null;
+  if (!convo || !convo.open) {
+    host.hidden = true;
+    return;
+  }
   host.innerHTML = "";
   if (pins.length === 0) {
     host.hidden = true;
@@ -242,23 +283,6 @@ function renderPins() {
     });
     host.appendChild(chip);
   }
-}
-
-function renderModeChip() {
-  if (!modeChipEl) return;
-  const mode = agentModeEl.value || state.agentMode || "review";
-  const info = modeInfo && modeInfo[mode];
-  modeChipEl.classList.remove("readonly", "edit");
-  if (!info) {
-    modeChipEl.textContent = "";
-    return;
-  }
-  modeChipEl.classList.add(mode === "fix" ? "edit" : "readonly");
-  const tools = info.allowed.join(", ");
-  modeChipEl.textContent = `${info.description} — ${tools}`;
-  modeChipEl.title =
-    info.description +
-    (info.disallowed.length ? ` (disallowed: ${info.disallowed.join(", ")})` : "");
 }
 
 // ---------- Split-pane helpers ----------
@@ -368,7 +392,16 @@ function wireEvents() {
     runAgent();
   });
 
-  $("agentInput").addEventListener("input", () => setAgentStatus(""));
+  $("agentInput").addEventListener("input", () => {
+    setAgentStatus("");
+    autoGrowInput();
+  });
+  $("agentInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("agentForm").requestSubmit();
+    }
+  });
 
   $("clearConsole").addEventListener("click", () => {
     consoleOut.textContent = "";
@@ -381,16 +414,51 @@ function wireEvents() {
     renderTranscript(state.active);
   });
 
+  // Start Chat: open this tab's closed chat with a fresh session, then reveal
+  // the transcript + input and focus it.
+  $("startChatBtn").addEventListener("click", () => {
+    if (!state.active) return;
+    startChat(state.active);
+    consoleEl.classList.remove("collapsed");
+    renderTranscript(state.active);
+    renderPins(); // surface any pins that were hidden while the chat was closed
+    $("agentInput").focus();
+  });
+
+  // Drag-resize the console via its top-edge handle
+  const resizeHandle = $("consoleResize");
+  if (resizeHandle) {
+    resizeHandle.addEventListener("pointerdown", (e) => {
+      if (consoleEl.classList.contains("collapsed")) return;
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = consoleEl.getBoundingClientRect().height;
+      consoleEl.classList.add("resizing");
+      resizeHandle.setPointerCapture(e.pointerId);
+      const onMove = (ev) => {
+        // Dragging UP (smaller clientY) grows the console.
+        applyConsoleHeight(startH + (startY - ev.clientY));
+      };
+      const onUp = () => {
+        resizeHandle.releasePointerCapture(e.pointerId);
+        consoleEl.classList.remove("resizing");
+        resizeHandle.removeEventListener("pointermove", onMove);
+        resizeHandle.removeEventListener("pointerup", onUp);
+        persist();
+      };
+      resizeHandle.addEventListener("pointermove", onMove);
+      resizeHandle.addEventListener("pointerup", onUp);
+    });
+  }
+
   // Collapse console by clicking its label area
   $("console").querySelector(".console-head").addEventListener("click", (e) => {
     if (e.target.closest(".console-controls")) return;
     consoleEl.classList.toggle("collapsed");
   });
 
-  agentModeEl.addEventListener("change", () => {
-    state.agentMode = agentModeEl.value;
-    renderModeChip();
-    persist();
+  $("agentStop").addEventListener("click", () => {
+    if (agentAbort) agentAbort.abort();
   });
 
   $("addrCommentsBtn").addEventListener("click", () => {
@@ -401,12 +469,6 @@ function wireEvents() {
       return;
     }
     if (agentActive) return; // a turn is already streaming; don't double-fire
-    // Addressing comments means editing — force fix mode (mirror the mode
-    // <select> change handler's side-effects) before kicking off.
-    agentModeEl.value = "fix";
-    state.agentMode = "fix";
-    renderModeChip();
-    persist();
     $("agentInput").value = buildCommentReviewPrompt(tab.key);
     runAgent();
   });
@@ -2251,8 +2313,8 @@ async function resolveThread(tab, cm) {
 // ---------- Agent ----------
 // Build the task prompt that drives the pr-comment-review skill against a
 // specific PR in ORCHESTRATED mode (triage → one plan approval → implement
-// items one at a time). The "Address PR comments" button forces fix mode, so
-// the prompt always assumes edits are allowed.
+// items one at a time). The agent always has edit permissions, so the prompt
+// assumes edits are allowed.
 function buildCommentReviewPrompt(prRef) {
   return (
     `Use the pr-comment-review skill in ORCHESTRATED mode to address the review ` +
@@ -2260,11 +2322,12 @@ function buildCommentReviewPrompt(prRef) {
     `straight to orchestrated: triage every thread into a categorized fix plan, ` +
     `present the plan and wait for my approval, then implement the actionable ` +
     `items one at a time, reading the real code first and QA-ing each change. ` +
-    `Mode is \`fix\` — you may apply edits.`
+    `You may apply edits.`
   );
 }
 
 let agentActive = false;
+let agentAbort = null; // AbortController for the in-flight agent turn
 // In-progress run output (agent or checks) for the tab keyed by `key`. The
 // console is one global element shared by every tab, so a run that keeps
 // streaming after the user switches tabs must NOT paint into another tab's
@@ -2274,10 +2337,17 @@ let agentActive = false;
 let liveRun = null;
 
 // Stream one fragment of a run: buffer it (so a tab switch-back can replay it)
-// and paint it to the shared console only while this run's tab is on screen.
+// and paint it into the live element only while this run's tab is on screen.
 function emit(key, text, cls) {
   if (liveRun && liveRun.key === key) liveRun.pieces.push({ text, cls });
-  if (state.active === key) append(text, cls);
+  if (state.active !== key || !liveRun || !liveRun.el) return;
+  if (liveRun.role === "agent") {
+    liveRun.elText = (liveRun.elText || "") + text;
+    liveRun.el.textContent = liveRun.elText; // raw while streaming
+    scrollConsole();
+  } else {
+    appendTermLine(liveRun.el, text, cls);
+  }
 }
 
 // Populate the checks command field for the current repo path: a saved
@@ -2330,7 +2400,17 @@ async function runChecksFlow() {
   // output through liveRun/emit too: only paint to the active tab, and commit
   // the result to that tab's transcript so it survives switches and reloads.
   const key = state.active;
-  liveRun = { key, pieces: [] };
+  // Running checks expands the console so its output is visible, but does NOT
+  // start an agent session (started stays false, no /api/agent call). If the
+  // tab's chat is still closed, open it and sync the chrome before we stream.
+  const checksConvo = key ? conversationFor(key) : null;
+  if (checksConvo && !checksConvo.open) {
+    checksConvo.open = true;
+    persist();
+    renderTranscript(key);
+  }
+  liveRun = { key, role: "out", pieces: [], el: null };
+  if (state.active === key) liveRun.el = appendTermBlock();
   const header = `\n› checks: ${command}\n`;
   emit(key, header, "sys");
   checksActive = true;
@@ -2377,6 +2457,26 @@ async function runChecksFlow() {
   }
 }
 
+// Build a "Current PR" preamble identifying the PR the user has open, so the
+// agent can pull it up itself (e.g. `gh pr view owner/repo#123`) even when no
+// local checkout is set. Identity only — title + ref + URL; the agent fetches
+// any detail it needs. Returns "" when no tab is active. Prepended to the FIRST
+// turn of a conversation only (later turns resume a session that already has
+// this context — see runAgent()).
+function buildPrContext() {
+  const tab = state.active ? state.tabs.find((t) => t.key === state.active) : null;
+  if (!tab) return "";
+  const ref = `${tab.owner}/${tab.repo}#${tab.number}`;
+  const url = tab.data && tab.data.url ? tab.data.url : "";
+  return (
+    "[Current PR — the user has this PR open.]\n" +
+    `${ref}  "${tab.title}"\n` +
+    (url ? `${url}\n` : "") +
+    `Use \`gh pr view ${ref}\` for details.\n` +
+    "[End current PR]\n\n"
+  );
+}
+
 // Build a "Pinned context" preamble from the active tab's pins so the agent
 // knows exactly which lines the user is pointing at, quoting the code verbatim.
 // Returns "" when there are no pins.
@@ -2405,12 +2505,28 @@ function setAgentStatus(text) {
   if (el) el.textContent = text || "";
 }
 
+// Locks the input + shows the pulsing "Claude is working…" indicator while an
+// agent turn is streaming.
+// Grow the textarea to fit its content, capped by CSS max-height.
+function autoGrowInput() {
+  const el = $("agentInput");
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 160) + "px";
+}
+
+function setAgentBusy(busy) {
+  const input = $("agentInput");
+  const indicator = $("workingIndicator");
+  if (input) input.disabled = busy;
+  if (indicator) indicator.hidden = !busy;
+}
+
 async function runAgent() {
   if (agentActive) return;
   const input = $("agentInput");
   const prompt = input.value.trim();
   if (!prompt) return;
-  const fullPrompt = buildPinnedContext() + prompt;
 
   consoleEl.classList.remove("collapsed");
   const repoPath = repoPathEl.value.trim();
@@ -2428,6 +2544,12 @@ async function runAgent() {
   const sessionId = convo ? convo.sessionId : undefined;
   const resume = convo ? convo.started : false;
 
+  // PR identity is injected only on the first turn — later turns resume a
+  // Claude Code session that already carries it. Pinned context stays per-turn
+  // because the user's pins change message to message.
+  const fullPrompt =
+    (resume ? "" : buildPrContext()) + buildPinnedContext() + prompt;
+
   // Record + echo the user's turn — store what they actually typed, not the
   // pinned-context plumbing that gets prepended for the agent.
   if (convo) {
@@ -2436,19 +2558,28 @@ async function runAgent() {
   }
   // The user echo is already a stored turn, so paint it directly (only while
   // its tab is on screen) rather than buffering it on liveRun.
-  liveRun = { key, pieces: [] };
-  if (state.active === key) append(`\n› ${prompt}\n`, "user");
+  liveRun = { key, role: "agent", pieces: [], el: null, elText: "" };
+  if (state.active === key) {
+    appendUserBubble(prompt);
+    liveRun.el = appendAgentBubble();
+  }
   input.value = "";
+  input.style.height = "auto";
   agentActive = true;
   $("agentRun").disabled = true;
+  setAgentBusy(true);
   setAgentStatus("");
+  agentAbort = new AbortController();
+  $("agentRun").hidden = true;
+  $("agentStop").hidden = false;
 
   let agentText = "";
   try {
     const res = await fetch("/api/agent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: fullPrompt, repoPath, mode: agentModeEl.value, sessionId, resume }),
+      body: JSON.stringify({ prompt: fullPrompt, repoPath, sessionId, resume }),
+      signal: agentAbort.signal,
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -2463,19 +2594,36 @@ async function runAgent() {
     // message in this tab can resume it instead of starting fresh.
     if (convo) convo.started = true;
   } catch (e) {
-    const msg = `\n⚠ ${e.message}\n`;
-    agentText += msg;
-    emit(key, msg, "err");
+    if (e.name === "AbortError") {
+      // Stop was clicked. The request was dispatched and the child launched, so
+      // the session now exists on disk — mark it started so the next message
+      // resumes it. Reusing --session-id against an existing session would error
+      // with no self-heal; --resume against a vanished one falls back cleanly.
+      if (convo) convo.started = true;
+    } else {
+      const msg = `\n⚠ ${e.message}\n`;
+      agentText += msg;
+      emit(key, msg, "err");
+    }
   } finally {
     // Persist the agent's reply as one transcript turn so it survives reloads
-    // and tab switches, then clear the in-progress buffer.
-    if (convo) {
+    // and tab switches, then clear the in-progress buffer. Skip an empty reply
+    // (e.g. Stop clicked before any text streamed) so no blank bubble lingers.
+    if (convo && agentText) {
       convo.turns.push({ role: "agent", text: agentText });
       persist();
+    }
+    if (state.active === key && liveRun && liveRun.el) {
+      if (agentText) finalizeAgentBubble(liveRun.el, agentText);
+      else liveRun.el.closest(".message")?.remove(); // drop the empty bubble
     }
     liveRun = null;
     agentActive = false;
     $("agentRun").disabled = false;
+    $("agentRun").hidden = false;
+    $("agentStop").hidden = true;
+    agentAbort = null;
+    setAgentBusy(false);
     // Turn finished — make it legible that the ball is in the user's court.
     // Only when this run's tab is on screen (don't hijack focus on a bg tab).
     if (state.active === key) {
@@ -2487,38 +2635,124 @@ async function runAgent() {
   }
 }
 
-// Render a single stored transcript turn, mirroring append()'s styling. A
-// "user" turn gets the prompt prefix + accent; everything else carries its own
-// optional class (sys, exit-ok, exit-bad, or none for plain agent/checks output).
-function renderTurn(turn) {
-  if (!turn) return;
-  if (turn.role === "user") {
-    append(`\n› ${turn.text}\n`, "user");
-  } else {
-    append(turn.text, turn.cls);
-  }
-}
-
 // Rebuild the console from the given tab's stored conversation, then replay any
 // in-progress run for that tab. Called when a tab is activated so each tab shows
 // its own thread — including a run still streaming after a tab switch.
 function renderTranscript(key) {
+  const convo = key ? conversationFor(key) : null;
+  const open = !!(convo && convo.open);
+
+  // Toggle closed vs open chrome. Closed: show the Start Chat placeholder and
+  // hide the transcript + input. Open: show transcript + input, hide placeholder.
+  const startEl = $("chatStart");
+  const startBtn = $("startChatBtn");
+  const formEl = $("agentForm");
+  if (startEl) startEl.hidden = open;
+  if (startBtn) startBtn.disabled = !key; // nothing to start without an active PR tab
+  if (formEl) formEl.hidden = !open;
+  consoleOut.hidden = !open;
+
+  if (!open) {
+    // Closed: no transcript, no pins, no status chrome.
+    const pins = $("pinChips");
+    if (pins) pins.hidden = true;
+    consoleOut.textContent = "";
+    setAgentStatus("");
+    return;
+  }
+
   consoleOut.textContent = "";
   setAgentStatus("");
-  const convo = key ? conversationFor(key) : null;
-  if (convo) for (const turn of convo.turns) renderTurn(turn);
-  if (liveRun && liveRun.key === key) {
-    for (const p of liveRun.pieces) append(p.text, p.cls);
+  if (convo) {
+    let termPre = null; // current open terminal block for consecutive out turns
+    for (const turn of convo.turns) {
+      if (turn.role === "out") {
+        if (!termPre) termPre = appendTermBlock();
+        appendTermLine(termPre, turn.text, turn.cls);
+        continue;
+      }
+      termPre = null;
+      if (turn.role === "user") appendUserBubble(turn.text);
+      else finalizeAgentBubble(appendAgentBubble(), turn.text); // agent: markdown
+    }
   }
+  // Replay an in-progress run for this tab and reconnect the live element.
+  if (liveRun && liveRun.key === key) {
+    if (liveRun.role === "agent") {
+      const bubble = appendAgentBubble();
+      liveRun.el = bubble;
+      liveRun.elText = liveRun.pieces.map((p) => p.text).join("");
+      bubble.textContent = liveRun.elText;
+    } else {
+      const pre = appendTermBlock();
+      liveRun.el = pre;
+      for (const p of liveRun.pieces) appendTermLine(pre, p.text, p.cls);
+    }
+  }
+  scrollConsole();
+}
+
+// Build + append a right-aligned user bubble.
+function appendUserBubble(text) {
+  const wrap = document.createElement("div");
+  wrap.className = "message user";
+  const bubble = document.createElement("div");
+  bubble.className = "message-bubble";
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
+  consoleOut.appendChild(wrap);
+  scrollConsole();
+  return wrap;
+}
+
+// Build + append an EMPTY left-aligned agent bubble; returns the inner element
+// streaming writes into. While streaming we set .textContent (raw); on
+// finalize we swap in rendered markdown.
+function appendAgentBubble() {
+  const wrap = document.createElement("div");
+  wrap.className = "message assistant";
+  const bubble = document.createElement("div");
+  bubble.className = "message-bubble";
+  wrap.appendChild(bubble);
+  consoleOut.appendChild(wrap);
+  scrollConsole();
+  return bubble;
+}
+
+function finalizeAgentBubble(bubbleEl, text) {
+  bubbleEl.innerHTML = `<div class="md-preview">${mdParse(text || "", { gfm: true, breaks: false })}</div>`;
+  scrollConsole();
+}
+
+// Build + append a full-width terminal block; returns the inner <pre>.
+function appendTermBlock() {
+  const wrap = document.createElement("div");
+  wrap.className = "message system";
+  const pre = document.createElement("pre");
+  pre.className = "term-block";
+  wrap.appendChild(pre);
+  consoleOut.appendChild(wrap);
+  scrollConsole();
+  return pre;
+}
+
+// Append a classed text span into a terminal <pre>.
+function appendTermLine(pre, text, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = text;
+  pre.appendChild(span);
+  scrollConsole();
+}
+
+function scrollConsole() {
   consoleOut.scrollTop = consoleOut.scrollHeight;
 }
 
+// Generic one-off notice: render as a standalone terminal block.
 function append(text, cls) {
-  const node = document.createElement("span");
-  if (cls) node.className = cls;
-  node.textContent = text;
-  consoleOut.appendChild(node);
-  consoleOut.scrollTop = consoleOut.scrollHeight;
+  const pre = appendTermBlock();
+  appendTermLine(pre, text, cls);
 }
 
 // ---------- Diff parsing ----------

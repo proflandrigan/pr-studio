@@ -51,17 +51,11 @@
     </main>
 
     <section class="console" id="console" aria-label="Claude Code agent">
+      <div class="console-resize" id="consoleResize" title="Drag to resize"></div>
       <div class="console-head">
         <span class="console-glyph">◗</span>
         <span class="console-label">Claude Code</span>
-        <span class="mode-chip" id="modeChip"></span>
         <div class="console-controls">
-          <label class="mode" title="review = read-only · fix = allows edits">
-            <select id="agentMode">
-              <option value="review">review (read-only)</option>
-              <option value="fix">fix (allows edits)</option>
-            </select>
-          </label>
           <input
             id="repoPath"
             class="repo-path"
@@ -84,20 +78,28 @@
           <button class="btn ghost" id="clearConsole" type="button">Clear</button>
         </div>
       </div>
-      <pre class="console-out" id="consoleOut"></pre>
+      <div class="console-out messages" id="consoleOut" hidden></div>
+      <div class="chat-start" id="chatStart">
+        <button class="btn accent" id="startChatBtn" type="button" disabled>Start Chat</button>
+        <p class="chat-start-hint">Start a fresh Claude Code session for this PR.</p>
+      </div>
       <div class="pin-chips" id="pinChips" hidden></div>
-      <form class="console-in" id="agentForm">
+      <form class="console-in" id="agentForm" hidden>
         <span class="prompt-glyph">›</span>
-        <input
+        <textarea
           id="agentInput"
           class="agent-input"
-          type="text"
+          rows="1"
           placeholder="Task the agent — e.g. address the review comments in src/auth.js"
           autocomplete="off"
-        />
+        ></textarea>
+        <span class="working-indicator" id="workingIndicator" hidden>
+          <span class="working-indicator-dot"></span>Claude is working…
+        </span>
         <span class="agent-status" id="agentStatus" aria-live="polite"></span>
         <button class="btn ghost" id="addrCommentsBtn" type="button">Address PR comments</button>
         <button class="btn accent" id="agentRun" type="submit">Run</button>
+        <button class="btn stop" id="agentStop" type="button" hidden>Stop</button>
       </form>
     </section>
 
