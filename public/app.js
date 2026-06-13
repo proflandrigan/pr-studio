@@ -165,7 +165,18 @@ async function init() {
     state.checkCmds = saved.checkCmds || {};
     state.breakdowns = saved.breakdowns || {};
     state.pins = saved.pins || {};
+    // Restored conversations keep their transcript, but their persisted
+    // sessionId/started refer to a Claude Code session that may no longer exist
+    // (server restarted, repo path changed, session store cleared/expired).
+    // Resuming it would fail with "No conversation found with session ID …", so
+    // start every restored thread fresh on load: keep the visible turns, drop
+    // the resume flag, and mint a new sessionId so the next message can't
+    // collide with a session still on disk under the old id.
     state.conversations = saved.conversations || {};
+    for (const convo of Object.values(state.conversations)) {
+      convo.started = false;
+      convo.sessionId = crypto.randomUUID();
+    }
     state.agentMode = saved.agentMode || "review";
     state.showResolved = Boolean(saved.showResolved);
     state.done = saved.done || {};

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { tmpdir } from "node:os";
-import { extractJson, buildBreakdownPrompt, buildAgentArgs, formatEvent, resolveAgentCwd } from "./agent.js";
+import { extractJson, buildBreakdownPrompt, buildAgentArgs, formatEvent, resolveAgentCwd, isSessionNotFoundError } from "./agent.js";
 
 test("resolveAgentCwd falls back to a temp dir for review with no path", () => {
   const r = resolveAgentCwd({ repoPath: "", mode: "review" });
@@ -126,4 +126,21 @@ test("formatEvent renders tool_use lines", () => {
     message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "a.js" } }] },
   });
   assert.equal(out, "\n  → Read(a.js)\n");
+});
+
+test("isSessionNotFoundError matches Claude's resume-not-found message", () => {
+  assert.ok(isSessionNotFoundError("No conversation found with session ID: abc-123"));
+});
+
+test("isSessionNotFoundError is case-insensitive and tolerates surrounding text", () => {
+  assert.ok(isSessionNotFoundError("Error: NO CONVERSATION FOUND with Session Id 9f8e"));
+  assert.ok(isSessionNotFoundError("\n[banner]\nno conversation found with session id deadbeef\n"));
+});
+
+test("isSessionNotFoundError returns false for unrelated errors and empty input", () => {
+  assert.ok(!isSessionNotFoundError(""));
+  assert.ok(!isSessionNotFoundError(null));
+  assert.ok(!isSessionNotFoundError(undefined));
+  assert.ok(!isSessionNotFoundError("Permission denied"));
+  assert.ok(!isSessionNotFoundError("session id provided but conversation loaded fine"));
 });
