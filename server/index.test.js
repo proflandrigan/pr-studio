@@ -24,6 +24,8 @@ test("GET /api/health returns expected shape", async () => {
   assert.ok(body.tokenSource === null || typeof body.tokenSource === "string");
   assert.ok(body.defaultRepoPath === null || typeof body.defaultRepoPath === "string");
   assert.strictEqual(typeof body.claudeAvailable, "boolean");
+  assert.strictEqual(typeof body.bootId, "string");
+  assert.ok(body.bootId.length > 0);
 });
 
 test("parsePrRef parses a full PR URL", () => {

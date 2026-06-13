@@ -2,7 +2,8 @@ import process from "node:process";
 import express from "express";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 // Load .env if present (built-in, no dependency). Safe to ignore if missing.
 try {
@@ -35,6 +36,11 @@ app.use("/vendor/marked", express.static(join(__dirname, "..", "node_modules", "
 
 const PORT = process.env.PORT || 4317;
 
+// A fresh id per server process. The frontend compares it against the last
+// value it saw; a change means `npm start` was re-run, which is the signal to
+// start every PR tab's chat fresh (clean session, no restored transcript).
+const BOOT_ID = randomUUID();
+
 function wrap(handler) {
   return async (req, res) => {
     try {
@@ -54,12 +60,31 @@ function checkClaudeAvailable() {
   }
 }
 
+// Open the default browser at `url` on startup. Best-effort and fire-and-forget:
+// pick the platform opener, ignore failures (headless/SSH), and never block or
+// crash the server. Suppressed when PR_STUDIO_NO_OPEN is set (any truthy value).
+function openBrowser(url) {
+  if (process.env.PR_STUDIO_NO_OPEN) return;
+  const platform = process.platform;
+  const cmd =
+    platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
+  const args = platform === "win32" ? ["/c", "start", "", url] : [url];
+  try {
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.on("error", () => {}); // swallow ENOENT etc. — opening is optional
+    child.unref();
+  } catch {
+    /* opening the browser is best-effort; never fail startup over it */
+  }
+}
+
 app.get("/api/health", (req, res) => {
   res.json({
     githubToken: hasToken(),
     tokenSource: tokenSource(),
     defaultRepoPath: process.env.DEFAULT_REPO_PATH || null,
     claudeAvailable: checkClaudeAvailable(),
+    bootId: BOOT_ID,
   });
 });
 
@@ -218,5 +243,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       console.log("  ⚠  No GitHub token (GITHUB_TOKEN or `gh auth login`) — browse public PRs only, can't post comments.");
     }
     console.log("");
+    openBrowser(`http://localhost:${PORT}`);
   });
 }

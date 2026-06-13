@@ -12,8 +12,9 @@ const state = {
   hideDone: false, // view toggle: hide locally-done comments
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
   pins: {}, // key -> [ { id, file, side, startLine, endLine, code } ]
-  conversations: {}, // key -> { sessionId, started, turns: [ { role, text } ] }
+  conversations: {}, // key -> { sessionId, started, open, turns: [ { role, text } ] }
   consoleHeight: null, // px height of the agent console, persisted from drag-resize
+  bootId: null, // last-seen server boot id; a change across loads means npm start re-ran
 };
 
 function keyOf(o, r, n) {
@@ -49,16 +50,24 @@ function pinsFor(key) {
 function conversationFor(key) {
   if (!key) return null;
   if (!state.conversations[key]) {
-    state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, turns: [] };
+    state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, open: false, turns: [] };
   }
+  return state.conversations[key];
+}
+
+// Open a PR tab's chat: replace its conversation with a brand-new, OPEN
+// session (fresh session id, empty transcript). Used by the "Start Chat"
+// button shown while a tab's chat is closed, and reused by "New chat".
+function startChat(key) {
+  if (!key) return null;
+  state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, open: true, turns: [] };
+  persist();
   return state.conversations[key];
 }
 
 function resetConversation(key) {
   if (!key) return null;
-  state.conversations[key] = { sessionId: crypto.randomUUID(), started: false, turns: [] };
-  persist();
-  return state.conversations[key];
+  return startChat(key);
 }
 
 function addPin(key, pin) {
@@ -100,6 +109,7 @@ function persist() {
     pins: state.pins,
     conversations: state.conversations,
     consoleHeight: state.consoleHeight,
+    bootId: state.bootId,
   };
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(slim));
@@ -153,18 +163,21 @@ async function init() {
     state.checkCmds = saved.checkCmds || {};
     state.breakdowns = saved.breakdowns || {};
     state.pins = saved.pins || {};
-    // Restored conversations keep their transcript, but their persisted
-    // sessionId/started refer to a Claude Code session that may no longer exist
-    // (server restarted, repo path changed, session store cleared/expired).
-    // Resuming it would fail with "No conversation found with session ID …", so
-    // start every restored thread fresh on load: keep the visible turns, drop
-    // the resume flag, and mint a new sessionId so the next message can't
-    // collide with a session still on disk under the old id.
-    state.conversations = saved.conversations || {};
-    for (const convo of Object.values(state.conversations)) {
-      convo.started = false;
-      convo.sessionId = crypto.randomUUID();
+    // Decide whether to keep or wipe stored conversations based on the server's
+    // boot id (from /api/health). A changed bootId means the server process
+    // restarted — `npm start` was re-run — so every prior Claude Code session is
+    // gone: drop all conversations and let each PR tab open with a fresh, closed
+    // chat. On a plain reload (same bootId) the sessions still live on disk, so
+    // restore verbatim, keeping sessionId/started so a thread can resume. If we
+    // couldn't reach the server (no bootId), preserve what's stored rather than
+    // destroying the user's chats.
+    const serverBootId = healthInfo && healthInfo.bootId;
+    if (!serverBootId || saved.bootId === serverBootId) {
+      state.conversations = saved.conversations || {};
+    } else {
+      state.conversations = {};
     }
+    state.bootId = serverBootId || saved.bootId || null;
     state.showResolved = Boolean(saved.showResolved);
     state.done = saved.done || {};
     state.hideDone = Boolean(saved.hideDone);
@@ -231,6 +244,11 @@ function renderPins() {
   const host = document.getElementById("pinChips");
   if (!host) return;
   const pins = state.active ? pinsFor(state.active) : [];
+  const convo = state.active ? conversationFor(state.active) : null;
+  if (!convo || !convo.open) {
+    host.hidden = true;
+    return;
+  }
   host.innerHTML = "";
   if (pins.length === 0) {
     host.hidden = true;
@@ -384,6 +402,17 @@ function wireEvents() {
   $("newChat").addEventListener("click", () => {
     if (state.active) resetConversation(state.active);
     renderTranscript(state.active);
+  });
+
+  // Start Chat: open this tab's closed chat with a fresh session, then reveal
+  // the transcript + input and focus it.
+  $("startChatBtn").addEventListener("click", () => {
+    if (!state.active) return;
+    startChat(state.active);
+    consoleEl.classList.remove("collapsed");
+    renderTranscript(state.active);
+    renderPins(); // surface any pins that were hidden while the chat was closed
+    $("agentInput").focus();
   });
 
   // Drag-resize the console via its top-edge handle
@@ -2361,6 +2390,15 @@ async function runChecksFlow() {
   // output through liveRun/emit too: only paint to the active tab, and commit
   // the result to that tab's transcript so it survives switches and reloads.
   const key = state.active;
+  // Running checks expands the console so its output is visible, but does NOT
+  // start an agent session (started stays false, no /api/agent call). If the
+  // tab's chat is still closed, open it and sync the chrome before we stream.
+  const checksConvo = key ? conversationFor(key) : null;
+  if (checksConvo && !checksConvo.open) {
+    checksConvo.open = true;
+    persist();
+    renderTranscript(key);
+  }
   liveRun = { key, role: "out", pieces: [], el: null };
   if (state.active === key) liveRun.el = appendTermBlock();
   const header = `\n› checks: ${command}\n`;
@@ -2583,9 +2621,30 @@ async function runAgent() {
 // in-progress run for that tab. Called when a tab is activated so each tab shows
 // its own thread — including a run still streaming after a tab switch.
 function renderTranscript(key) {
+  const convo = key ? conversationFor(key) : null;
+  const open = !!(convo && convo.open);
+
+  // Toggle closed vs open chrome. Closed: show the Start Chat placeholder and
+  // hide the transcript + input. Open: show transcript + input, hide placeholder.
+  const startEl = $("chatStart");
+  const startBtn = $("startChatBtn");
+  const formEl = $("agentForm");
+  if (startEl) startEl.hidden = open;
+  if (startBtn) startBtn.disabled = !key; // nothing to start without an active PR tab
+  if (formEl) formEl.hidden = !open;
+  consoleOut.hidden = !open;
+
+  if (!open) {
+    // Closed: no transcript, no pins, no status chrome.
+    const pins = $("pinChips");
+    if (pins) pins.hidden = true;
+    consoleOut.textContent = "";
+    setAgentStatus("");
+    return;
+  }
+
   consoleOut.textContent = "";
   setAgentStatus("");
-  const convo = key ? conversationFor(key) : null;
   if (convo) {
     let termPre = null; // current open terminal block for consecutive out turns
     for (const turn of convo.turns) {

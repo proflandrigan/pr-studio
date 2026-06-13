@@ -78,9 +78,13 @@
           <button class="btn ghost" id="clearConsole" type="button">Clear</button>
         </div>
       </div>
-      <div class="console-out messages" id="consoleOut"></div>
+      <div class="console-out messages" id="consoleOut" hidden></div>
+      <div class="chat-start" id="chatStart">
+        <button class="btn accent" id="startChatBtn" type="button" disabled>Start Chat</button>
+        <p class="chat-start-hint">Start a fresh Claude Code session for this PR.</p>
+      </div>
       <div class="pin-chips" id="pinChips" hidden></div>
-      <form class="console-in" id="agentForm">
+      <form class="console-in" id="agentForm" hidden>
         <span class="prompt-glyph">›</span>
         <textarea
           id="agentInput"
