@@ -44,14 +44,21 @@ Four backend modules, each a focused concern, wired together in `index.js`:
 - **`server/index.js`** — Express app. JSON API + static file serving. The
   `wrap()` helper turns thrown errors (with optional `err.status`) into JSON
   responses. The agent endpoint is the one exception to the JSON pattern: it
-  streams `text/plain` chunks and kills the child process on `req.close`.
+  streams **NDJSON** (`application/x-ndjson`, one typed event per line) and
+  kills the child process on real client disconnect. `GET /api/fs/list` backs
+  the UI's folder picker — it returns the subdirectories of an absolute path
+  (`{ path, parent, entries }`, defaulting to `DEFAULT_REPO_PATH` or the home
+  dir) so the browser can pick a checkout it otherwise can't read the path of.
 - **`server/github.js`** — all GitHub REST access via built-in `fetch`. The `gh()`
   helper centralizes auth headers and error normalization. `parsePrRef()` accepts
   a full PR URL or `owner/repo#123`. Note the **two comment systems**: top-level
   conversation comments use the `/issues/{n}/comments` endpoint; inline code
   comments use `/pulls/{n}/comments` and require `commit_id` + `path` + `line`.
-- **`server/agent.js`** — spawns Claude Code and translates its `stream-json`
-  output (one JSON event per line) into readable console text via `formatEvent`.
+- **`server/agent.js`** — spawns Claude Code and maps its `stream-json` output
+  (one JSON event per line) into typed `{ type: text | tool | result }` events
+  via `eventsFromStreamJson` (exported, unit-tested); `runAgent` emits those
+  (plus `notice` events) so the frontend can separate reasoning/tool calls from
+  the final answer rather than getting a flat text blob.
   This is the part a browser fundamentally can't do — it needs a local process
   with filesystem access. `buildAgentArgs()` (exported, unit-tested) assembles
   the CLI args and threads **multi-turn session** flags: the first turn of a
@@ -84,16 +91,24 @@ question-only turns still work without a checkout. Commits and pushes stay manua
 Single global `state` object holding open PR tabs, persisted to `localStorage`
 (`persist()`/`loadPersisted()`); tabs are keyed by `owner/repo#number` via
 `keyOf()`. The agent console reads the streaming `/api/agent` response with a
-`ReadableStream` reader and appends decoded chunks live. Diffs are rendered from
-GitHub's per-file `patch` strings parsed client-side by `parsePatch()`.
+`ReadableStream` reader, splits it into NDJSON lines, and dispatches each typed
+event live. Diffs are rendered from GitHub's per-file `patch` strings parsed
+client-side by `parsePatch()`. A folder-icon button beside the repo-path input
+opens an `#fsModal` overlay that browses `GET /api/fs/list` and drops the chosen
+absolute path into the field (dispatching a `change` so persist + check-command
+refresh runs).
 
 **Per-tab chat / sessions.** Each tab owns a conversation in
 `state.conversations[key] = { sessionId, started, turns: [{ role, text, cls? }] }`
 (`conversationFor()` lazily creates one with `crypto.randomUUID()`;
 `resetConversation()` — wired to the **New chat** button — starts a fresh
-thread). `runAgent()` records the user's turn, streams the reply (accumulating
-it into one `agent` turn), and flips `started → true` on completion so the next
-message resumes the session. Checks append their own `out` turns
+thread). `runAgent()` records the user's turn and streams the reply: `text`
+events accumulate into the answer bubble, while a `tool` event demotes the
+bubble's current prose into a collapsible **"Worked through N steps"** activity
+log (reasoning steps + tool calls + notices) and clears the bubble — so only
+post-last-tool prose remains as the clean answer. It flips `started → true` on
+completion so the next message resumes the session. Old text-only turns still
+render. Checks append their own `out` turns
 (header/body/result, each with an optional `cls`) to the active tab so the
 trust signal persists too. `renderTranscript(key)` rebuilds the console from
 the stored turns and is called from `activate()`, so switching tabs swaps
