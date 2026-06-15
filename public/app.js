@@ -538,6 +538,102 @@ function wireEvents() {
     if (pinButtonEl && !e.target.closest(".pin-to-chat")) removePinButton();
   });
   document.addEventListener("scroll", removePinButton, true);
+
+  // Folder picker
+  $("browsePath").addEventListener("click", openFsModal);
+  $("fsCancel").addEventListener("click", closeFsModal);
+  $("fsCancelFoot").addEventListener("click", closeFsModal);
+  $("fsChoose").addEventListener("click", chooseFsDir);
+  $("fsUp").addEventListener("click", () => {
+    const parent = $("fsUp").dataset.parent;
+    if (parent) loadFsDir(parent);
+  });
+  // Click a folder row to descend into it.
+  $("fsList").addEventListener("click", (e) => {
+    const item = e.target.closest(".fs-item");
+    if (item && item.dataset.path) loadFsDir(item.dataset.path);
+  });
+  // Click the backdrop (outside the dialog) or press Escape to close.
+  $("fsModal").addEventListener("click", (e) => {
+    if (e.target === $("fsModal")) closeFsModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("fsModal").hidden) closeFsModal();
+  });
+}
+
+// ---------- Folder picker modal ----------
+// Browses the server's filesystem (GET /api/fs/list) so the user can pick a
+// local checkout folder. The browser can't read absolute paths, so the server
+// lists dirs and we drop the chosen absolute path into #repoPath.
+let fsCurrentDir = null;
+
+async function loadFsDir(path) {
+  const url = path
+    ? `/api/fs/list?path=${encodeURIComponent(path)}`
+    : "/api/fs/list";
+  let data;
+  try {
+    const res = await fetch(url);
+    data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not read folder");
+  } catch (e) {
+    // Surface the failure inline in the list rather than silently doing nothing.
+    $("fsList").innerHTML = "";
+    const li = document.createElement("li");
+    li.className = "fs-empty";
+    li.textContent = e.message || "Could not read folder";
+    $("fsList").appendChild(li);
+    return;
+  }
+  fsCurrentDir = data.path;
+  $("fsCurrentPath").textContent = data.path;
+  $("fsCurrentPath").title = data.path;
+  $("fsUp").disabled = !data.parent;
+  $("fsUp").dataset.parent = data.parent || "";
+
+  const list = $("fsList");
+  list.innerHTML = "";
+  if (!data.entries.length) {
+    const li = document.createElement("li");
+    li.className = "fs-empty";
+    li.textContent = "No subfolders here — choose this folder, or go up.";
+    list.appendChild(li);
+    return;
+  }
+  for (const entry of data.entries) {
+    const li = document.createElement("li");
+    li.className = "fs-item";
+    li.dataset.path = entry.path;
+    const icon = document.createElement("span");
+    icon.className = "fs-item-icon";
+    icon.textContent = "📁"; // 📁
+    const name = document.createElement("span");
+    name.className = "fs-item-name";
+    name.textContent = entry.name;
+    li.append(icon, name);
+    list.appendChild(li);
+  }
+}
+
+function openFsModal() {
+  $("fsModal").hidden = false;
+  // Seed from the current field value if it looks like a path, else server default.
+  const seed = repoPathEl.value.trim();
+  loadFsDir(seed || null);
+}
+
+function closeFsModal() {
+  $("fsModal").hidden = true;
+}
+
+function chooseFsDir() {
+  if (fsCurrentDir) {
+    repoPathEl.value = fsCurrentDir;
+    // Fire the existing change handler (persists path + refreshes check cmd).
+    repoPathEl.dispatchEvent(new Event("change"));
+  }
+  closeFsModal();
 }
 
 // ---------- Open / fetch PR ----------
