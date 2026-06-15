@@ -58,11 +58,15 @@ Edit `.env`:
 2. Click a file to expand its diff. Click any added or context line to leave an
    inline comment. Use the box at the bottom of a PR for a general comment.
 3. In the **Claude Code** console at the bottom, set the path to your local
-   checkout of that repo and type a task. The agent can read, search, run `git`,
-   and edit files, so it handles both "summarize the risky changes in this PR"
-   and "address the review comments in src/auth.js." Chat is turn-based: each
-   message runs to completion, and the agent "asks for input" by ending a turn
-   with a question your next message answers. **New chat** starts a fresh thread.
+   checkout of that repo — type it, or click the folder button to browse the
+   server's filesystem and pick it — and type a task. The agent can read,
+   search, run `git`, and edit files, so it handles both "summarize the risky
+   changes in this PR" and "address the review comments in src/auth.js." Chat is
+   turn-based: each message runs to completion, and the agent "asks for input"
+   by ending a turn with a question your next message answers. Each reply shows
+   a clean answer with the agent's reasoning and tool calls tucked into a
+   collapsible "Worked through N steps" log above it. **New chat** starts a
+   fresh thread.
 
 The agent runs in *your* checkout, so after it edits, `git diff` in that repo
 shows what it did. Pushing/committing stays in your hands.
