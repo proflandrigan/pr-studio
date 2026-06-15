@@ -2,8 +2,9 @@
 import process from "node:process";
 import express from "express";
 import { fileURLToPath } from "node:url";
-import { realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { realpathSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, resolve, parse as parsePath } from "node:path";
+import { homedir } from "node:os";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
@@ -209,6 +210,50 @@ app.get(
     const repoPath = req.query.repoPath || process.env.DEFAULT_REPO_PATH;
     const detected = detectCheckCommand(repoPath); // { command, source } | null
     res.json(detected || { command: null, source: null });
+  })
+);
+
+app.get(
+  "/api/fs/list",
+  wrap(async (req, res) => {
+    // Default to the configured checkout, else the user's home dir.
+    const raw = req.query.path || process.env.DEFAULT_REPO_PATH || homedir();
+    const dir = resolve(raw);
+
+    // Reject non-directories up front with a clean 400.
+    let st;
+    try {
+      st = statSync(dir);
+    } catch {
+      throw Object.assign(new Error(`Cannot open: ${dir}`), { status: 400 });
+    }
+    if (!st.isDirectory()) {
+      throw Object.assign(new Error(`Not a directory: ${dir}`), { status: 400 });
+    }
+
+    // Subdirectories only. Skip entries we can't stat (permission errors) and
+    // hidden dotfolders are kept (useful for repos like .config checkouts) but
+    // not the . / .. pseudo-entries (readdirSync already omits those).
+    let entries = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+        .filter((e) => {
+          try {
+            return e.isDirectory() ||
+              (e.isSymbolicLink() && statSync(resolve(dir, e.name)).isDirectory());
+          } catch {
+            return false;
+          }
+        })
+        .map((e) => ({ name: e.name, path: resolve(dir, e.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      throw Object.assign(new Error(`Cannot read: ${dir}`), { status: 400 });
+    }
+
+    // parent is null when already at the filesystem root.
+    const parent = parsePath(dir).root === dir ? null : dirname(dir);
+    res.json({ path: dir, parent, entries });
   })
 );
 

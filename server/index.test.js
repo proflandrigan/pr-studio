@@ -2,6 +2,10 @@ import { test, before, after } from "node:test";
 import assert from "node:assert";
 import { app } from "./index.js";
 import { parsePrRef, repoFromUrl } from "./github.js";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 let server;
 let baseUrl;
@@ -36,6 +40,40 @@ test("parsePrRef parses a full PR URL", () => {
 test("parsePrRef parses owner/repo#123 shorthand", () => {
   const ref = parsePrRef("octocat/hello-world#42");
   assert.deepStrictEqual(ref, { owner: "octocat", repo: "hello-world", number: 42 });
+});
+
+test("GET /api/fs/list returns path, parent and dir entries", async () => {
+  const res = await fetch(
+    `${baseUrl}/api/fs/list?path=${encodeURIComponent(projectRoot)}`
+  );
+  assert.strictEqual(res.status, 200);
+  const body = await res.json();
+  assert.strictEqual(typeof body.path, "string");
+  assert.ok(body.parent === null || typeof body.parent === "string");
+  assert.ok(Array.isArray(body.entries));
+  const names = body.entries.map((e) => e.name);
+  assert.ok(names.includes("server"));
+  assert.ok(names.includes("public"));
+  for (const e of body.entries) {
+    assert.strictEqual(typeof e.name, "string");
+    assert.ok(e.path.endsWith(e.name));
+  }
+});
+
+test("GET /api/fs/list with a bad path returns 400 JSON error", async () => {
+  const res = await fetch(
+    `${baseUrl}/api/fs/list?path=${encodeURIComponent("/no/such/dir/xyz")}`
+  );
+  assert.strictEqual(res.status, 400);
+  const body = await res.json();
+  assert.strictEqual(typeof body.error, "string");
+});
+
+test("GET /api/fs/list with no path defaults to a directory", async () => {
+  const res = await fetch(`${baseUrl}/api/fs/list`);
+  assert.strictEqual(res.status, 200);
+  const body = await res.json();
+  assert.strictEqual(typeof body.path, "string");
 });
 
 test("parsePrRef throws with status 400 on invalid input", () => {
