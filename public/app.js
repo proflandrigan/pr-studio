@@ -2309,7 +2309,7 @@ function buildExpandedRows(parsedRows, fileLines, expansions) {
     const m = parsedRows[i].text.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (!m) continue;
     const startNewLine = Number(m[1]);
-    let endNewLine = startNewLine;
+    let endNewLine = startNewLine - 1;
     for (let j = i + 1; j < parsedRows.length && parsedRows[j].type !== "hunk"; j++) {
       if (parsedRows[j].newLine != null) endNewLine = parsedRows[j].newLine;
     }
@@ -2403,7 +2403,9 @@ function buildDiffElement(file, tab) {
   const resolvedContent = tab.resolvedFileContents?.[file.filename];
   const hunkExps = tab.hunkExpansions?.[file.filename];
   if (resolvedContent != null && hunkExps && Object.keys(hunkExps).length > 0) {
-    rows = buildExpandedRows(rows, resolvedContent.split("\n"), hunkExps);
+    const fileLines = resolvedContent.split("\n");
+    if (fileLines.length > 0 && fileLines[fileLines.length - 1] === "") fileLines.pop();
+    rows = buildExpandedRows(rows, fileLines, hunkExps);
   }
   const lang = hlLanguageFor(file.filename);
 
