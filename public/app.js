@@ -1613,6 +1613,10 @@ function renderFileDiff(file, tab) {
     <span class="file-status">${file.status}</span>
     ${count ? `<span class="file-comment-count">💬 ${count}</span>` : ""}
     <span class="file-counts"><span class="plus">+${file.additions}</span><span class="minus">−${file.deletions}</span></span>
+    <label class="review-toggle file-expand-toggle">
+      <input type="checkbox" class="file-expand-input" ${mode === "file" ? "checked" : ""} />
+      Full file
+    </label>
     ${showToggle ? `
       <label class="review-toggle view-mode-toggle">
         <input type="checkbox" class="view-mode-input" ${mode === "preview" ? "checked" : ""} />
@@ -1631,13 +1635,28 @@ function renderFileDiff(file, tab) {
     } else {
       renderPreview(file, tab, body);
     }
+  } else if (mode === "file") {
+    renderFullFileView(file, tab, body);
   } else {
     body.appendChild(buildDiffElement(file, tab));
   }
 
+  head.querySelector(".file-expand-input").addEventListener("change", (e) => {
+    tab.fileViewModes[file.filename] = e.target.checked ? "file" : "diff";
+    if (e.target.checked) {
+      const previewInput = head.querySelector(".view-mode-input");
+      if (previewInput) previewInput.checked = false;
+    }
+    renderMain(tab);
+  });
+
   if (showToggle) {
     head.querySelector(".view-mode-input").addEventListener("change", (e) => {
       tab.fileViewModes[file.filename] = e.target.checked ? "preview" : "diff";
+      if (e.target.checked) {
+        const expandInput = head.querySelector(".file-expand-input");
+        if (expandInput) expandInput.checked = false;
+      }
       renderMain(tab);
     });
   }
@@ -1869,6 +1888,115 @@ function fetchFileContent(tab, filename) {
     if (!r.ok) throw new Error(body.error || "Failed to load file");
     return body.content;
   });
+}
+
+async function renderFullFileView(file, tab, container) {
+  container.innerHTML = `<div class="preview-loading">Loading full file…</div>`;
+
+  tab.fileContents = tab.fileContents || {};
+  if (!tab.fileContents[file.filename]) {
+    tab.fileContents[file.filename] = fetchFileContent(tab, file.filename);
+  }
+
+  let content;
+  try {
+    content = await tab.fileContents[file.filename];
+  } catch (e) {
+    if (!fileIsVisible(tab, file.filename) || getFileViewMode(tab, file) !== "file") return;
+    if (!container.isConnected) return;
+    delete tab.fileContents[file.filename];
+    container.innerHTML = "";
+    const note = document.createElement("div");
+    note.className = "binary-note";
+    note.textContent = `Failed to load file: ${e.message}`;
+    const btn = document.createElement("button");
+    btn.className = "btn ghost";
+    btn.type = "button";
+    btn.textContent = "Show diff";
+    btn.addEventListener("click", () => {
+      tab.fileViewModes[file.filename] = "diff";
+      renderMain(tab);
+    });
+    container.appendChild(note);
+    container.appendChild(btn);
+    return;
+  }
+
+  if (!fileIsVisible(tab, file.filename) || getFileViewMode(tab, file) !== "file") return;
+  if (!container.isConnected) return;
+
+  container.innerHTML = "";
+  container.appendChild(buildFullFileElement(file, tab, content));
+
+  if (pendingMainScroll != null) {
+    const main = $("fileMain");
+    if (main) main.scrollTop = pendingMainScroll;
+    pendingMainScroll = null;
+  }
+}
+
+function buildFullFileElement(file, tab, content) {
+  const diff = document.createElement("div");
+  diff.className = "diff";
+
+  if (!content || content.trim() === "") {
+    diff.innerHTML = `<div class="binary-note">(empty file)</div>`;
+    return diff;
+  }
+
+  // Determine which new-file line numbers are "added" in this diff
+  const addedLines = new Set();
+  if (file.patch) {
+    for (const row of parsePatch(file.patch)) {
+      if (row.type === "add" && row.newLine) addedLines.add(row.newLine);
+    }
+  }
+
+  const byLine = inlineCommentsByLine(tab, file.filename);
+  const placedRight = new Set();
+
+  const lines = content.split("\n");
+  // Remove the trailing empty string that split("\n") adds for files ending with \n
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+
+  const lang = hlLanguageFor(file.filename);
+  const hl = highlightToLines(content, lang); // null if lang unknown / hljs unavailable
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineNum = i + 1;
+    const isAdd = addedLines.has(lineNum);
+
+    const row = document.createElement("div");
+    row.className = `diff-row ${isAdd ? "add" : "context"} commentable`;
+    row.dataset.file = file.filename;
+    row.dataset.side = "RIGHT";
+    row.dataset.line = String(lineNum);
+
+    const codeHtml = hl ? (hl[i] ?? esc(lines[i])) : esc(lines[i]);
+    row.innerHTML = `<span class="ln">${lineNum}</span><span class="code">${codeHtml}</span>`;
+    row.addEventListener("click", () => openInlineComposer(row, file, { side: "RIGHT", line: lineNum }, tab));
+
+    diff.appendChild(row);
+
+    // Place any inline comment threads right after their target line
+    if (byLine.right.has(lineNum)) {
+      byLine.right.get(lineNum).forEach((cm) => diff.appendChild(renderInlineThread(cm, { tab })));
+      placedRight.add(lineNum);
+    }
+  }
+
+  // Orphaned right-side comments (lines no longer in file or outside range)
+  for (const [ln, arr] of byLine.right.entries()) {
+    if (!placedRight.has(ln)) {
+      arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true, tab })));
+    }
+  }
+  // Left-side (deleted line) comments have no home in a full-file view of HEAD
+  for (const arr of byLine.left.values()) {
+    arr.forEach((cm) => diff.appendChild(renderInlineThread(cm, { orphaned: true, tab })));
+  }
+
+  return diff;
 }
 
 // Loads (and caches per-tab) a markdown file's content and renders it into
@@ -2168,6 +2296,96 @@ async function renderNotebookPreview(file, tab, container) {
   }
 }
 
+// Inserts expanded context rows around hunks based on expansion config.
+// parsedRows: output from parsePatch
+// fileLines: array of lines from the resolved file content (0-indexed, 1-based line numbers)
+// expansions: { hunkKey -> { above: N, below: N } } where hunkKey = string(newFileStartLine)
+// Returns a new rows array with additional context rows inserted, marked with expanded: true.
+function buildExpandedRows(parsedRows, fileLines, expansions) {
+  // Pre-scan: find each hunk's new-file start line and last visible new-file line
+  const hunkBoundaries = [];
+  for (let i = 0; i < parsedRows.length; i++) {
+    if (parsedRows[i].type !== "hunk") continue;
+    const m = parsedRows[i].text.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (!m) continue;
+    const startNewLine = Number(m[1]);
+    let endNewLine = startNewLine - 1;
+    for (let j = i + 1; j < parsedRows.length && parsedRows[j].type !== "hunk"; j++) {
+      if (parsedRows[j].newLine != null) endNewLine = parsedRows[j].newLine;
+    }
+    hunkBoundaries.push({ hunkIdx: i, startNewLine, endNewLine });
+  }
+
+  if (hunkBoundaries.length === 0) return parsedRows;
+
+  const result = [];
+  const seenNewLines = new Set();
+  let hunkBoundaryIdx = 0;
+  let i = 0;
+
+  while (i < parsedRows.length) {
+    const row = parsedRows[i];
+
+    if (row.type === "hunk") {
+      const boundary = hunkBoundaries[hunkBoundaryIdx];
+      const hunkKey = boundary ? String(boundary.startNewLine) : null;
+      const exp = (hunkKey && expansions[hunkKey]) ? expansions[hunkKey] : { above: 0, below: 0 };
+
+      // Expand ABOVE this hunk (show last `exp.above` lines of the gap before the hunk)
+      if (boundary && exp.above > 0) {
+        const prevBoundary = hunkBoundaries[hunkBoundaryIdx - 1];
+        const gapStart = prevBoundary ? prevBoundary.endNewLine + 1 : 1;
+        const gapEnd = boundary.startNewLine - 1;
+        if (gapEnd >= gapStart) {
+          const showFrom = Math.max(gapStart, gapEnd - exp.above + 1);
+          for (let ln = showFrom; ln <= gapEnd; ln++) {
+            if (!seenNewLines.has(ln) && fileLines[ln - 1] !== undefined) {
+              result.push({ type: "context", text: fileLines[ln - 1], newLine: ln, oldLine: null, expanded: true });
+              seenNewLines.add(ln);
+            }
+          }
+        }
+      }
+
+      // Hunk header row
+      result.push(row);
+      i++;
+
+      // Hunk content rows
+      while (i < parsedRows.length && parsedRows[i].type !== "hunk") {
+        const r = parsedRows[i];
+        if (r.newLine != null) seenNewLines.add(r.newLine);
+        result.push(r);
+        i++;
+      }
+
+      // Expand BELOW this hunk (show first `exp.below` lines of the gap after the hunk)
+      if (boundary && exp.below > 0) {
+        const nextBoundary = hunkBoundaries[hunkBoundaryIdx + 1];
+        const gapStart = boundary.endNewLine + 1;
+        const gapEnd = nextBoundary ? nextBoundary.startNewLine - 1 : fileLines.length;
+        if (gapEnd >= gapStart) {
+          const showTo = Math.min(gapEnd, gapStart + exp.below - 1);
+          for (let ln = gapStart; ln <= showTo; ln++) {
+            if (!seenNewLines.has(ln) && fileLines[ln - 1] !== undefined) {
+              result.push({ type: "context", text: fileLines[ln - 1], newLine: ln, oldLine: null, expanded: true });
+              seenNewLines.add(ln);
+            }
+          }
+        }
+      }
+
+      hunkBoundaryIdx++;
+    } else {
+      if (row.newLine != null) seenNewLines.add(row.newLine);
+      result.push(row);
+      i++;
+    }
+  }
+
+  return result;
+}
+
 // Builds the rendered diff (rows + any inline comment threads) for one file.
 function buildDiffElement(file, tab) {
   const diff = document.createElement("div");
@@ -2181,7 +2399,14 @@ function buildDiffElement(file, tab) {
   const byLine = inlineCommentsByLine(tab, file.filename);
   const placedRight = new Set();
   const placedLeft = new Set();
-  const rows = parsePatch(file.patch);
+  let rows = parsePatch(file.patch);
+  const resolvedContent = tab.resolvedFileContents?.[file.filename];
+  const hunkExps = tab.hunkExpansions?.[file.filename];
+  if (resolvedContent != null && hunkExps && Object.keys(hunkExps).length > 0) {
+    const fileLines = resolvedContent.split("\n");
+    if (fileLines.length > 0 && fileLines[fileLines.length - 1] === "") fileLines.pop();
+    rows = buildExpandedRows(rows, fileLines, hunkExps);
+  }
   const lang = hlLanguageFor(file.filename);
 
   // RIGHT (new file) view = context + added lines, in patch order.
@@ -2376,9 +2601,70 @@ function renderInlineThread(cm, opts = {}) {
   return el;
 }
 
+async function handleHunkExpand(file, tab, hunkKey, dir, fileBodyEl, hunkRowEl) {
+  const btn = hunkRowEl ? hunkRowEl.querySelector(`[data-dir="${dir}"]`) : null;
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+
+  tab.fileContents = tab.fileContents || {};
+  if (!tab.fileContents[file.filename]) {
+    tab.fileContents[file.filename] = fetchFileContent(tab, file.filename);
+  }
+
+  let content;
+  try {
+    content = await tab.fileContents[file.filename];
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = dir === "up" ? "▲" : "▼"; }
+    return;
+  }
+
+  // Store resolved content for sync access in buildDiffElement/buildExpandedRows
+  tab.resolvedFileContents = tab.resolvedFileContents || {};
+  tab.resolvedFileContents[file.filename] = content;
+
+  // Update expansion state
+  tab.hunkExpansions = tab.hunkExpansions || {};
+  tab.hunkExpansions[file.filename] = tab.hunkExpansions[file.filename] || {};
+  const exp = tab.hunkExpansions[file.filename][hunkKey] || { above: 0, below: 0 };
+  if (dir === "up") exp.above += 10;
+  else exp.below += 10;
+  tab.hunkExpansions[file.filename][hunkKey] = exp;
+
+  // Re-render just the file body (not the entire main panel)
+  if (fileBodyEl && fileBodyEl.isConnected) {
+    fileBodyEl.innerHTML = "";
+    fileBodyEl.appendChild(buildDiffElement(file, tab));
+  }
+}
+
 function renderDiffRow(row, file, tab) {
   const el = document.createElement("div");
   el.className = "diff-row " + row.type;
+  if (row.expanded) el.classList.add("expanded-context");
+
+  if (row.type === "hunk") {
+    const m = row.text.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const hunkKey = m ? m[1] : null;
+    el.innerHTML = `
+      <span class="ln hunk-btns">
+        <button class="hunk-expand-btn" type="button" data-dir="up" title="Expand context above">▲</button>
+        <button class="hunk-expand-btn" type="button" data-dir="down" title="Expand context below">▼</button>
+      </span>
+      <span class="code">${esc(row.text)}</span>
+    `;
+    if (hunkKey) {
+      el.querySelector('[data-dir="up"]').addEventListener("click", (e) => {
+        e.stopPropagation();
+        handleHunkExpand(file, tab, hunkKey, "up", el.closest(".file-body"), el);
+      });
+      el.querySelector('[data-dir="down"]').addEventListener("click", (e) => {
+        e.stopPropagation();
+        handleHunkExpand(file, tab, hunkKey, "down", el.closest(".file-body"), el);
+      });
+    }
+    return el;
+  }
+
   const canComment = row.type === "add" || row.type === "context" || row.type === "del";
   if (canComment) el.classList.add("commentable");
 

@@ -1359,6 +1359,18 @@ body {
   margin-left: auto;
 }
 
+.file-expand-toggle {
+  margin-left: auto;
+}
+
+.diff-row.expanded-context {
+  background: rgba(100, 160, 230, 0.06);
+}
+.diff-row.expanded-context .ln {
+  background: rgba(100, 160, 230, 0.12);
+  color: var(--muted);
+}
+
 .preview-loading {
   padding: 12px 14px;
   color: var(--muted);
@@ -1420,6 +1432,36 @@ body {
 .diff-row.hunk .code {
   color: var(--accent);
   opacity: 0.8;
+}
+
+.hunk-btns {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  width: 48px;
+  flex: none;
+}
+
+.hunk-expand-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted-dim);
+  font-size: 9px;
+  padding: 1px 3px;
+  line-height: 1;
+  border-radius: 3px;
+  user-select: none;
+}
+.hunk-expand-btn:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.hunk-expand-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .binary-note {
