@@ -2441,18 +2441,13 @@ let agentAbort = null; // AbortController for the in-flight agent turn
 // matching tab. Committed to convo.turns when the run finishes, then cleared.
 let liveRun = null;
 
-// Stream one fragment of a run: buffer it (so a tab switch-back can replay it)
-// and paint it into the live element only while this run's tab is on screen.
+// Stream one fragment of a CHECKS run: buffer it (so a tab switch-back can
+// replay it) and paint it into the live <pre> only while this run's tab is on
+// screen. (Agent runs no longer use emit — see handleAgentEvent.)
 function emit(key, text, cls) {
   if (liveRun && liveRun.key === key) liveRun.pieces.push({ text, cls });
   if (state.active !== key || !liveRun || !liveRun.el) return;
-  if (liveRun.role === "agent") {
-    liveRun.elText = (liveRun.elText || "") + text;
-    liveRun.el.textContent = liveRun.elText; // raw while streaming
-    scrollConsole();
-  } else {
-    appendTermLine(liveRun.el, text, cls);
-  }
+  appendTermLine(liveRun.el, text, cls);
 }
 
 // Populate the checks command field for the current repo path: a saved
@@ -2663,10 +2658,10 @@ async function runAgent() {
   }
   // The user echo is already a stored turn, so paint it directly (only while
   // its tab is on screen) rather than buffering it on liveRun.
-  liveRun = { key, role: "agent", pieces: [], el: null, elText: "" };
+  liveRun = { key, role: "agent", answerText: "", activity: [], resultText: "", bubble: null };
   if (state.active === key) {
     appendUserBubble(prompt);
-    liveRun.el = appendAgentBubble();
+    liveRun.bubble = appendAgentBubble();
   }
   input.value = "";
   input.style.height = "auto";
@@ -2678,7 +2673,7 @@ async function runAgent() {
   $("agentRun").hidden = true;
   $("agentStop").hidden = false;
 
-  let agentText = "";
+  let buf = "";
   try {
     const res = await fetch("/api/agent", {
       method: "POST",
@@ -2691,10 +2686,15 @@ async function runAgent() {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      const chunk = dec.decode(value, { stream: true });
-      agentText += chunk;
-      emit(key, chunk);
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.trim()) handleAgentEvent(key, parseEventLine(line));
+      }
     }
+    if (buf.trim()) handleAgentEvent(key, parseEventLine(buf));
     // The HTTP turn finished, so the session now exists on disk; the next
     // message in this tab can resume it instead of starting fresh.
     if (convo) convo.started = true;
@@ -2706,21 +2706,21 @@ async function runAgent() {
       // with no self-heal; --resume against a vanished one falls back cleanly.
       if (convo) convo.started = true;
     } else {
-      const msg = `\n⚠ ${e.message}\n`;
-      agentText += msg;
-      emit(key, msg, "err");
+      handleAgentEvent(key, { type: "notice", level: "error", text: e.message });
     }
   } finally {
     // Persist the agent's reply as one transcript turn so it survives reloads
     // and tab switches, then clear the in-progress buffer. Skip an empty reply
     // (e.g. Stop clicked before any text streamed) so no blank bubble lingers.
-    if (convo && agentText) {
-      convo.turns.push({ role: "agent", text: agentText });
+    const answer = liveRun.answerText.trim() ? liveRun.answerText : liveRun.resultText;
+    const hasContent = !!(answer.trim() || liveRun.activity.length);
+    if (convo && hasContent) {
+      convo.turns.push({ role: "agent", text: answer, activity: liveRun.activity.slice() });
       persist();
     }
-    if (state.active === key && liveRun && liveRun.el) {
-      if (agentText) finalizeAgentBubble(liveRun.el, agentText);
-      else liveRun.el.closest(".message")?.remove(); // drop the empty bubble
+    if (state.active === key && liveRun.bubble) {
+      if (hasContent) finalizeAgentTurn(liveRun, answer);
+      else liveRun.bubble.closest(".message")?.remove(); // drop the empty bubble
     }
     liveRun = null;
     agentActive = false;
@@ -2778,16 +2778,19 @@ function renderTranscript(key) {
       }
       termPre = null;
       if (turn.role === "user") appendUserBubble(turn.text);
-      else finalizeAgentBubble(appendAgentBubble(), turn.text); // agent: markdown
+      else renderAgentTurn(turn);
     }
   }
   // Replay an in-progress run for this tab and reconnect the live element.
   if (liveRun && liveRun.key === key) {
     if (liveRun.role === "agent") {
       const bubble = appendAgentBubble();
-      liveRun.el = bubble;
-      liveRun.elText = liveRun.pieces.map((p) => p.text).join("");
-      bubble.textContent = liveRun.elText;
+      liveRun.bubble = bubble;
+      if (liveRun.activity.length) {
+        renderActivityBody(activityBodyFor(bubble), liveRun.activity);
+        updateActivitySummary(bubble);
+      }
+      bubble.textContent = liveRun.answerText; // raw while still streaming
     } else {
       const pre = appendTermBlock();
       liveRun.el = pre;
@@ -2795,6 +2798,111 @@ function renderTranscript(key) {
     }
   }
   scrollConsole();
+}
+
+// Parse one NDJSON line from /api/agent into a typed event; a non-JSON line is
+// treated as raw assistant text so nothing is silently dropped.
+function parseEventLine(line) {
+  try { return JSON.parse(line); }
+  catch { return { type: "text", text: line }; }
+}
+
+// Apply one streamed agent event to the live run's model and (only while its tab
+// is on screen) the DOM. Demotion: prose accumulates in the answer bubble; a tool
+// event pushes that prose into the activity log as a reasoning step, records the
+// tool, and clears the bubble — so only post-last-tool prose remains as the answer.
+function handleAgentEvent(key, ev) {
+  if (!liveRun || liveRun.key !== key || liveRun.role !== "agent") return;
+  const live = state.active === key && liveRun.bubble;
+  if (ev.type === "text") {
+    liveRun.answerText += ev.text;
+    if (live) { liveRun.bubble.textContent = liveRun.answerText; scrollConsole(); }
+  } else if (ev.type === "tool") {
+    if (liveRun.answerText.trim()) liveRun.activity.push({ kind: "reasoning", text: liveRun.answerText });
+    liveRun.activity.push({ kind: "tool", text: ev.text });
+    liveRun.answerText = "";
+    if (live) {
+      renderActivityBody(activityBodyFor(liveRun.bubble), liveRun.activity);
+      updateActivitySummary(liveRun.bubble);
+      liveRun.bubble.textContent = "";
+      scrollConsole();
+    }
+  } else if (ev.type === "result") {
+    liveRun.resultText = ev.text || "";
+  } else if (ev.type === "notice") {
+    liveRun.activity.push({ kind: "notice", text: (ev.level === "error" ? "⚠ " : "") + ev.text });
+    if (live) {
+      renderActivityBody(activityBodyFor(liveRun.bubble), liveRun.activity);
+      updateActivitySummary(liveRun.bubble);
+      scrollConsole();
+    }
+  }
+  // ev.type === "end": nothing to do; stream close triggers finalize.
+}
+
+// Find (or lazily create) the collapsible activity <details> for an agent
+// bubble, inserted ABOVE the bubble in its column. Returns its body element.
+function activityBodyFor(bubble) {
+  const col = bubble.parentNode;
+  let details = col.querySelector(":scope > .agent-activity");
+  if (!details) {
+    details = document.createElement("details");
+    details.className = "agent-activity";
+    const summary = document.createElement("summary");
+    summary.className = "agent-activity-summary";
+    details.appendChild(summary);
+    const body = document.createElement("div");
+    body.className = "agent-activity-body";
+    details.appendChild(body);
+    col.insertBefore(details, bubble);
+  }
+  return details.querySelector(".agent-activity-body");
+}
+
+// Re-render an activity body from the model (idempotent — clears then rebuilds).
+function renderActivityBody(body, activity) {
+  body.textContent = "";
+  for (const entry of activity) {
+    const div = document.createElement("div");
+    div.className = "activity-step " + entry.kind;
+    div.textContent = entry.kind === "tool" ? "→ " + entry.text : entry.text;
+    body.appendChild(div);
+  }
+}
+
+// Update the activity summary label with the step count. Notices (errors and
+// the session self-heal message) would otherwise be hidden in the default-
+// collapsed log — and an errored turn drops its answer bubble entirely — so
+// auto-expand the log whenever it carries one, keeping such messages visible.
+function updateActivitySummary(bubble) {
+  const details = bubble.parentNode.querySelector(":scope > .agent-activity");
+  if (!details) return;
+  const n = details.querySelectorAll(".agent-activity-body .activity-step").length;
+  details.querySelector(".agent-activity-summary").textContent = `Worked through ${n} step${n === 1 ? "" : "s"}`;
+  if (details.querySelector(".agent-activity-body .activity-step.notice")) details.open = true;
+}
+
+// Finalize a live agent run: ensure the activity block is painted, then render
+// the answer markdown (or drop the bubble if there is no answer prose).
+function finalizeAgentTurn(live, answer) {
+  if (live.activity.length) {
+    renderActivityBody(activityBodyFor(live.bubble), live.activity);
+    updateActivitySummary(live.bubble);
+  }
+  if (answer.trim()) finalizeAgentBubble(live.bubble, answer);
+  else live.bubble.remove();
+}
+
+// Render a stored/persisted agent turn (activity log + answer bubble). Backward
+// compatible: old turns have only `text` and render as a plain answer bubble.
+function renderAgentTurn(turn) {
+  const bubble = appendAgentBubble();
+  if (turn.activity && turn.activity.length) {
+    renderActivityBody(activityBodyFor(bubble), turn.activity);
+    updateActivitySummary(bubble);
+  }
+  if (turn.text && turn.text.trim()) finalizeAgentBubble(bubble, turn.text);
+  else bubble.remove();
 }
 
 // Build + append a right-aligned user bubble.
@@ -2816,12 +2924,15 @@ function appendUserBubble(text) {
 function appendAgentBubble() {
   const wrap = document.createElement("div");
   wrap.className = "message assistant";
+  const col = document.createElement("div");
+  col.className = "agent-msg";
   const bubble = document.createElement("div");
   bubble.className = "message-bubble";
-  wrap.appendChild(bubble);
+  col.appendChild(bubble);
+  wrap.appendChild(col);
   consoleOut.appendChild(wrap);
   scrollConsole();
-  return bubble;
+  return bubble; // still returns the inner bubble; its parentNode is the column
 }
 
 function finalizeAgentBubble(bubbleEl, text) {

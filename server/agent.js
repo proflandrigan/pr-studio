@@ -113,9 +113,9 @@ export function runAgent({ prompt, repoPath, sessionId, resume, onData, onError,
         // stream-json emits one JSON event per line; surface human-readable text.
         try {
           const evt = JSON.parse(line);
-          onData(formatEvent(evt));
+          for (const ev of eventsFromStreamJson(evt)) onData(ev);
         } catch {
-          onData(line + "\n");
+          onData({ type: "text", text: line + "\n" });
         }
       }
     });
@@ -129,7 +129,13 @@ export function runAgent({ prompt, repoPath, sessionId, resume, onData, onError,
       onError(`Process error: ${e.message}\nIf this says "ENOENT", Claude Code isn't on your PATH.`);
     });
     child.on("close", (code) => {
-      if (buffer.trim()) onData(buffer);
+      if (buffer.trim()) {
+        try {
+          for (const ev of eventsFromStreamJson(JSON.parse(buffer))) onData(ev);
+        } catch {
+          onData({ type: "text", text: buffer });
+        }
+      }
       // Self-heal: a resume against a vanished session exits non-zero with
       // "No conversation found with session ID …". Retry once as a fresh
       // session under the same id, after telling the user context was lost.
@@ -137,7 +143,7 @@ export function runAgent({ prompt, repoPath, sessionId, resume, onData, onError,
       // never prints a notice.
       if (canFallback && code !== 0 && isSessionNotFoundError(errBuffer)) {
         retried = true;
-        onData("\n⚠ Previous session expired — starting a fresh one (earlier context not carried over).\n");
+        onData({ type: "notice", level: "info", text: "Previous session expired — starting a fresh one (earlier context not carried over)." });
         launch({ resume: false });
         return;
       }
@@ -305,18 +311,25 @@ export function runBreakdown({ files, title, repoPath }) {
   });
 }
 
-export function formatEvent(evt) {
-  // Translate a Claude Code stream-json event into a readable console line.
+// Translate one Claude Code stream-json event into an ordered array of typed
+// display events: assistant text blocks, tool calls, and (from the terminal
+// `result` event) the final answer text. Lets the UI route reasoning + tool
+// calls into a collapsed activity log while the answer gets its own bubble.
+// Returns [] for events with nothing to show (system/init, cost footer, etc.).
+export function eventsFromStreamJson(evt) {
+  if (!evt || typeof evt !== "object") return [];
   if (evt.type === "assistant" && evt.message && Array.isArray(evt.message.content)) {
-    return evt.message.content
-      .map((b) => {
-        if (b.type === "text") return b.text;
-        if (b.type === "tool_use") return `\n  → ${b.name}(${summarizeInput(b.input)})\n`;
-        return "";
-      })
-      .join("");
+    const out = [];
+    for (const b of evt.message.content) {
+      if (b.type === "text" && b.text) out.push({ type: "text", text: b.text });
+      else if (b.type === "tool_use") out.push({ type: "tool", text: `${b.name}(${summarizeInput(b.input)})` });
+    }
+    return out;
   }
-  return "";
+  if (evt.type === "result" && typeof evt.result === "string" && evt.result.length) {
+    return [{ type: "result", text: evt.result }];
+  }
+  return [];
 }
 
 function summarizeInput(input) {

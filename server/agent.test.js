@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { tmpdir } from "node:os";
-import { extractJson, buildBreakdownPrompt, buildAgentArgs, formatEvent, resolveAgentCwd, isSessionNotFoundError } from "./agent.js";
+import { extractJson, buildBreakdownPrompt, buildAgentArgs, resolveAgentCwd, isSessionNotFoundError, eventsFromStreamJson } from "./agent.js";
 
 test("resolveAgentCwd falls back to a temp dir with no path", () => {
   const r = resolveAgentCwd({ repoPath: "" });
@@ -93,30 +93,6 @@ test("buildBreakdownPrompt includes title, filenames, and JSON array instruction
   assert.ok(prompt.includes("JSON array"));
 });
 
-test("formatEvent drops the result/cost footer", () => {
-  assert.equal(formatEvent({ type: "result", total_cost_usd: 0.94 }), "");
-});
-
-test("formatEvent drops the session-init banner", () => {
-  assert.equal(formatEvent({ type: "system", subtype: "init", session_id: "abc" }), "");
-});
-
-test("formatEvent renders assistant text", () => {
-  const out = formatEvent({
-    type: "assistant",
-    message: { content: [{ type: "text", text: "hello" }] },
-  });
-  assert.equal(out, "hello");
-});
-
-test("formatEvent renders tool_use lines", () => {
-  const out = formatEvent({
-    type: "assistant",
-    message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "a.js" } }] },
-  });
-  assert.equal(out, "\n  → Read(a.js)\n");
-});
-
 test("isSessionNotFoundError matches Claude's resume-not-found message", () => {
   assert.ok(isSessionNotFoundError("No conversation found with session ID: abc-123"));
 });
@@ -132,4 +108,35 @@ test("isSessionNotFoundError returns false for unrelated errors and empty input"
   assert.ok(!isSessionNotFoundError(undefined));
   assert.ok(!isSessionNotFoundError("Permission denied"));
   assert.ok(!isSessionNotFoundError("session id provided but conversation loaded fine"));
+});
+
+test("eventsFromStreamJson maps an assistant text block to a text event", () => {
+  const out = eventsFromStreamJson({ type: "assistant", message: { content: [{ type: "text", text: "hello" }] } });
+  assert.deepStrictEqual(out, [{ type: "text", text: "hello" }]);
+});
+
+test("eventsFromStreamJson maps a tool_use block to a tool event", () => {
+  const out = eventsFromStreamJson({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "a.js" } }] } });
+  assert.deepStrictEqual(out, [{ type: "tool", text: "Read(a.js)" }]);
+});
+
+test("eventsFromStreamJson keeps interleaved text and tool order", () => {
+  const out = eventsFromStreamJson({ type: "assistant", message: { content: [
+    { type: "text", text: "let me look" },
+    { type: "tool_use", name: "Grep", input: { pattern: "emit" } },
+  ] } });
+  assert.deepStrictEqual(out, [
+    { type: "text", text: "let me look" },
+    { type: "tool", text: "Grep(emit)" },
+  ]);
+});
+
+test("eventsFromStreamJson emits the final result text", () => {
+  const out = eventsFromStreamJson({ type: "result", result: "the answer", total_cost_usd: 0.9 });
+  assert.deepStrictEqual(out, [{ type: "result", text: "the answer" }]);
+});
+
+test("eventsFromStreamJson returns [] for the init banner and empty results", () => {
+  assert.deepStrictEqual(eventsFromStreamJson({ type: "system", subtype: "init" }), []);
+  assert.deepStrictEqual(eventsFromStreamJson({ type: "result", result: "" }), []);
 });
