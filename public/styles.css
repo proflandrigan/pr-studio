@@ -1765,6 +1765,47 @@ body {
 .message.assistant .message-bubble .md-preview {
   white-space: normal;
 }
+.agent-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 82%;
+}
+.agent-msg .message-bubble {
+  max-width: 100%;
+}
+.agent-activity {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0c0f15;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.agent-activity-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 6px 10px;
+  color: var(--muted);
+  user-select: none;
+}
+.agent-activity-summary::-webkit-details-marker { display: none; }
+.agent-activity-summary::before { content: "\25b8  "; }
+.agent-activity[open] .agent-activity-summary::before { content: "\25be  "; }
+.agent-activity-body {
+  padding: 4px 10px 8px;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.activity-step {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #cdd3de;
+}
+.activity-step.tool { color: #8ab4f8; }
+.activity-step.reasoning { color: var(--muted); }
+.activity-step.notice { color: var(--del); }
 .term-block {
   margin: 0;
   width: 100%;

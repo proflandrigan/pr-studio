@@ -180,7 +180,7 @@ app.post(
 // Streams Claude Code output back as plain text chunks.
 app.post("/api/agent", (req, res) => {
   const { prompt, repoPath, sessionId, resume } = req.body || {};
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
 
@@ -189,9 +189,9 @@ app.post("/api/agent", (req, res) => {
     repoPath: repoPath || process.env.DEFAULT_REPO_PATH,
     sessionId,
     resume,
-    onData: (text) => res.write(text),
-    onError: (text) => res.write("\n\u26a0 " + text.replace(/\n/g, "\n\u26a0 ")),
-    onClose: (code) => res.end(`\n[exit ${code}]\n`),
+    onData: (ev) => res.write(JSON.stringify(ev) + "\n"),
+    onError: (text) => res.write(JSON.stringify({ type: "notice", level: "error", text }) + "\n"),
+    onClose: (code) => res.end(JSON.stringify({ type: "end", code }) + "\n"),
   });
 
   // Kill the agent only on a genuine client disconnect. Listen on `res`, not
