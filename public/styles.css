@@ -387,6 +387,72 @@ body {
   flex-wrap: wrap;
 }
 
+/* ---------- Branches dropdown ---------- */
+.branches-wrap {
+  position: relative;
+}
+
+.branches-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 320px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 6px;
+  box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.6);
+  z-index: 50;
+}
+
+.branches-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.branches-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.branches-row label {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.branches-path-row {
+  display: flex;
+  gap: 6px;
+}
+
+.branches-path-row input {
+  flex: 1;
+}
+
+.branches-select {
+  width: 100%;
+}
+
+.branches-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.branches-state {
+  padding: 8px 4px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--muted);
+  text-align: center;
+}
+.branches-state.error {
+  color: var(--del);
+}
+
 /* ---------- My PRs item badges ---------- */
 .my-pr-badge {
   font-size: 10px;

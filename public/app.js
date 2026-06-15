@@ -98,7 +98,8 @@ function removePin(key, id) {
 
 function persist() {
   const slim = {
-    refs: state.tabs.map((t) => ({ owner: t.owner, repo: t.repo, number: t.number })),
+    refs: state.tabs.filter((t) => t.kind !== "branch").map((t) => ({ owner: t.owner, repo: t.repo, number: t.number })),
+    branchRefs: state.tabs.filter((t) => t.kind === "branch").map((t) => ({ repoPath: t.repoPath, base: t.base, head: t.head })),
     active: state.active,
     repoPaths: state.repoPaths,
     checkCmds: state.checkCmds,
@@ -194,6 +195,9 @@ async function init() {
     state.consoleHeight = saved.consoleHeight || null;
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
+    }
+    for (const b of saved.branchRefs || []) {
+      await openBranchReview(b.repoPath, b.base, b.head, { silent: true });
     }
     if (saved.active && state.tabs.find((t) => t.key === saved.active)) {
       activate(saved.active);
@@ -525,6 +529,21 @@ function wireEvents() {
   myPrsPanel.addEventListener("change", (e) => {
     if (e.target.closest(".my-prs-filters")) renderFilteredMyPrs();
   });
+
+  const branchesBtn = $("branchesBtn");
+  const branchesPanel = $("branchesPanel");
+  branchesBtn.addEventListener("click", () => {
+    if (!branchesPanel.hidden) {
+      branchesPanel.hidden = true;
+      return;
+    }
+    branchesPanel.hidden = false;
+    loadBranchesPanel();
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".branches-wrap")) branchesPanel.hidden = true;
+  });
+
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".pr-title-wrap")) {
       const m = $("prTitleMenu");
@@ -540,7 +559,7 @@ function wireEvents() {
   document.addEventListener("scroll", removePinButton, true);
 
   // Folder picker
-  $("browsePath").addEventListener("click", openFsModal);
+  $("browsePath").addEventListener("click", () => openFsModalFor(repoPathEl));
   $("fsCancel").addEventListener("click", closeFsModal);
   $("fsCancelFoot").addEventListener("click", closeFsModal);
   $("fsChoose").addEventListener("click", chooseFsDir);
@@ -567,6 +586,7 @@ function wireEvents() {
 // local checkout folder. The browser can't read absolute paths, so the server
 // lists dirs and we drop the chosen absolute path into #repoPath.
 let fsCurrentDir = null;
+let fsTarget = repoPathEl;
 
 // Returns true if the listing loaded, false if it failed. Pass silent=true to
 // suppress the inline error (used when the caller will fall back to another dir).
@@ -621,14 +641,22 @@ async function loadFsDir(path, silent = false) {
   return true;
 }
 
-async function openFsModal() {
+async function openFsModal(seedEl) {
   $("fsModal").hidden = false;
   // Seed from the current field value if it looks like a path, else server default.
   // If that path can't be listed (missing, or a file rather than a directory),
   // fall back to the server default so the modal never opens into a dead end.
-  const seed = repoPathEl.value.trim();
+  const seed = (seedEl || fsTarget || repoPathEl).value.trim();
   const ok = await loadFsDir(seed || null, Boolean(seed));
   if (!ok && seed) await loadFsDir(null);
+}
+
+// Opens the folder picker targeting a given input element — used by the
+// Branches panel so it can browse into its own path field without disturbing
+// the console's #repoPath field.
+function openFsModalFor(el) {
+  fsTarget = el;
+  return openFsModal();
 }
 
 function closeFsModal() {
@@ -636,10 +664,10 @@ function closeFsModal() {
 }
 
 function chooseFsDir() {
-  if (fsCurrentDir) {
-    repoPathEl.value = fsCurrentDir;
+  if (fsCurrentDir && fsTarget) {
+    fsTarget.value = fsCurrentDir;
     // Fire the existing change handler (persists path + refreshes check cmd).
-    repoPathEl.dispatchEvent(new Event("change"));
+    fsTarget.dispatchEvent(new Event("change"));
   }
   closeFsModal();
 }
@@ -662,6 +690,7 @@ async function openPr(ref, opts = {}) {
   const existing = state.tabs.find((t) => t.key === key);
   const tab = {
     key,
+    kind: "pr",
     owner: parsed.owner,
     repo: parsed.repo,
     number: parsed.number,
@@ -691,13 +720,63 @@ async function openPr(ref, opts = {}) {
   persist();
 }
 
+// Stable, unique key for a local branch-review tab: identifies the repo
+// checkout and the base...head pair being diffed.
+function keyForBranch(repoPath, base, head) {
+  return `branch:${repoPath}@${base}...${head}`;
+}
+
+// Open a local branch diff as a tab, mirroring openPr() but sourced from
+// /api/branch/diff instead of GitHub. The returned data shape matches a PR's
+// diff shape, so sidebar/file-tree/diff rendering needs no changes — only tab
+// identity, persistence, and a few GitHub-only header bits branch on `kind`.
+async function openBranchReview(repoPath, base, head, opts = {}) {
+  let data;
+  try {
+    const qs = new URLSearchParams({ repoPath, base, head });
+    data = await fetch(`/api/branch/diff?${qs}`).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || "Failed to load branch diff");
+      return body;
+    });
+  } catch (e) {
+    if (!opts.silent) flashError(e.message);
+    return;
+  }
+  const key = keyForBranch(repoPath, base, head);
+  const repoName = repoPath.replace(/\/+$/, "").split("/").pop() || repoPath;
+  const tab = {
+    key,
+    kind: "branch",
+    repoPath, base, head,
+    // identity fields the rest of the UI reads:
+    owner: repoName, repo: repoName, number: null,
+    branchLabel: `${head} → ${base}`,
+    title: data.title || `${head} → ${base}`,
+    state: "open", draft: false,
+    data,
+    comments: null,
+  };
+  const existing = state.tabs.find((t) => t.key === key);
+  if (existing) { delete existing.fileContents; Object.assign(existing, tab); }
+  else state.tabs.push(tab);
+  // Remember the repo path for this tab so activate()/agent/checks use it.
+  state.repoPaths[key] = repoPath;
+  renderTabs();
+  activate(key);
+  loadComments(key);
+  persist();
+}
+window.openBranchReview = openBranchReview;
+
 async function loadComments(key) {
   const tab = state.tabs.find((t) => t.key === key);
   if (!tab) return;
   try {
-    const c = await fetch(
-      `/api/pr/comments?owner=${tab.owner}&repo=${tab.repo}&number=${tab.number}`
-    ).then((r) => r.json());
+    const url = tab.kind === "branch"
+      ? `/api/branch/comments?${new URLSearchParams({ repoPath: tab.repoPath, base: tab.base, head: tab.head })}`
+      : `/api/pr/comments?owner=${tab.owner}&repo=${tab.repo}&number=${tab.number}`;
+    const c = await fetch(url).then((r) => r.json());
     tab.comments = c;
     if (state.active === key) {
       // renderReview() rebuilds #fileSidebar and #fileMain from scratch, which
@@ -818,6 +897,83 @@ function renderFilteredMyPrs() {
 
 // Fetches the authenticated user's open PRs and renders them into the dropdown
 // panel. Selecting one reuses openPr(). Best-effort: failures render inline.
+// Builds the Branches panel form, seeds the repo path from the console field
+// / DEFAULT_REPO_PATH, fetches branches, and fills the head/base selects.
+async function loadBranchesPanel() {
+  const panel = $("branchesPanel");
+  const seedPath =
+    repoPathEl.value.trim() || (healthInfo && healthInfo.defaultRepoPath) || "";
+  panel.innerHTML = `
+    <div class="branches-form">
+      <div class="branches-row branches-path-row-wrap">
+        <label>Repo path</label>
+        <div class="branches-path-row">
+          <input id="branchRepoPath" class="my-prs-filter-text" type="text"
+                 placeholder="/path/to/local/checkout" autocomplete="off" spellcheck="false"
+                 value="${esc(seedPath)}">
+          <button class="btn ghost" id="branchBrowse" type="button" title="Browse for a folder">📁</button>
+        </div>
+      </div>
+      <div class="branches-row">
+        <label>Head (branch to review)</label>
+        <select id="branchHead" class="my-prs-filter-select branches-select"></select>
+      </div>
+      <div class="branches-row">
+        <label>Base (compare against)</label>
+        <select id="branchBase" class="my-prs-filter-select branches-select"></select>
+      </div>
+      <div class="branches-state" id="branchesState"></div>
+      <div class="branches-actions">
+        <button class="btn accent" id="branchReview" type="button" disabled>Review</button>
+      </div>
+    </div>`;
+  // Wire the browse button to the panel's own input via the generalized picker.
+  $("branchBrowse").addEventListener("click", () => openFsModalFor($("branchRepoPath")));
+  // When the path changes (typed or chosen), refetch branches.
+  $("branchRepoPath").addEventListener("change", () => fetchBranchesInto($("branchRepoPath").value.trim()));
+  $("branchReview").addEventListener("click", () => {
+    const repoPath = $("branchRepoPath").value.trim();
+    const head = $("branchHead").value, base = $("branchBase").value;
+    if (!repoPath || !head || !base) return;
+    $("branchesPanel").hidden = true;
+    window.openBranchReview(repoPath, base, head);
+  });
+  await fetchBranchesInto(seedPath);
+}
+
+// Fetches /api/branches for a path and populates the head/base selects (head
+// defaults to current, base to defaultBase). Shows loading/error state in
+// #branchesState and enables/disables the Review button.
+async function fetchBranchesInto(repoPath) {
+  const stateEl = $("branchesState");
+  const headSel = $("branchHead"), baseSel = $("branchBase"), reviewBtn = $("branchReview");
+  if (!repoPath) {
+    stateEl.textContent = "Enter a repo path.";
+    reviewBtn.disabled = true;
+    return;
+  }
+  stateEl.textContent = "Loading branches…";
+  reviewBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/branches?repoPath=${encodeURIComponent(repoPath)}`);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || "Failed to list branches");
+    const opts = (b, sel) =>
+      b.map((n) => `<option value="${esc(n)}"${n === sel ? " selected" : ""}>${esc(n)}</option>`).join("");
+    headSel.innerHTML = opts(body.branches, body.current);
+    baseSel.innerHTML = opts(body.branches, body.defaultBase);
+    stateEl.textContent = body.branches.length ? "" : "No branches found.";
+    reviewBtn.disabled = body.branches.length < 1;
+    stateEl.className = "branches-state";
+  } catch (e) {
+    stateEl.textContent = e.message;
+    stateEl.className = "branches-state error";
+    headSel.innerHTML = "";
+    baseSel.innerHTML = "";
+    reviewBtn.disabled = true;
+  }
+}
+
 async function loadMyPrs() {
   const panel = $("myPrsPanel");
   // Panel shell: persistent filter bar + a list container the list/loading/
@@ -885,9 +1041,10 @@ function renderTabs() {
     el.title = tab.title;
 
     const dotState = tab.draft ? "draft" : tab.state;
+    const label = tab.kind === "branch" ? tab.branchLabel : `${tab.repo}#${tab.number}`;
     el.innerHTML = `
       <span class="tab-dot ${dotState}"></span>
-      <span class="tab-label">${tab.repo}#${tab.number}</span>
+      <span class="tab-label">${esc(label)}</span>
       <button class="tab-close" title="Close">×</button>
     `;
     el.addEventListener("click", (e) => {
@@ -951,14 +1108,18 @@ function renderReview() {
   const stateClass = tab.draft ? "draft" : pr.state;
   const stateLabel = tab.draft ? "draft" : pr.state;
 
-  reviewEl.innerHTML = `
-    <div class="pr-head">
-      <div class="pr-title-wrap">
-        <h1 class="pr-title"><button type="button" class="pr-title-btn" id="prTitleBtn">${esc(pr.title)}<span class="pr-title-caret">▾</span></button></h1>
+  const titleHtml = tab.kind === "branch"
+    ? `<h1 class="pr-title">${esc(pr.title)}</h1>`
+    : `<h1 class="pr-title"><button type="button" class="pr-title-btn" id="prTitleBtn">${esc(pr.title)}<span class="pr-title-caret">▾</span></button></h1>
         <div class="pr-title-menu" id="prTitleMenu" hidden>
           <a class="pr-title-menu-item" id="prTitleOpen" href="${pr.url}" target="_blank" rel="noopener">Open in GitHub ↗</a>
           <button type="button" class="pr-title-menu-item" id="prTitleCopy" data-url="${esc(pr.url)}">Copy URL</button>
-        </div>
+        </div>`;
+
+  reviewEl.innerHTML = `
+    <div class="pr-head">
+      <div class="pr-title-wrap">
+        ${titleHtml}
       </div>
       <div class="pr-meta">
         <span class="badge ${stateClass}">${stateLabel}</span>
@@ -973,7 +1134,7 @@ function renderReview() {
     </div>
   `;
 
-  wireTitleMenu();
+  if (tab.kind !== "branch") wireTitleMenu();
 
   // Which sidebar entry is selected is transient UI state kept on the in-memory
   // tab so it survives re-renders (e.g. after posting a comment). Default: the
@@ -1696,10 +1857,13 @@ function buildPreviewElement(file, tab, content) {
   return root;
 }
 
-// Fetches a file's content at the PR's head SHA for markdown preview.
+// Fetches a file's content at the head SHA for markdown preview. Branch tabs
+// read straight from the local checkout (no GitHub); PR tabs go through GitHub.
 function fetchFileContent(tab, filename) {
   const ref = tab.data.headSha;
-  const url = `/api/pr/file?owner=${encodeURIComponent(tab.owner)}&repo=${encodeURIComponent(tab.repo)}&path=${encodeURIComponent(filename)}&ref=${encodeURIComponent(ref)}`;
+  const url = tab.kind === "branch"
+    ? `/api/branch/file?${new URLSearchParams({ repoPath: tab.repoPath, ref, path: filename })}`
+    : `/api/pr/file?owner=${encodeURIComponent(tab.owner)}&repo=${encodeURIComponent(tab.repo)}&path=${encodeURIComponent(filename)}&ref=${encodeURIComponent(ref)}`;
   return fetch(url).then(async (r) => {
     const body = await r.json();
     if (!r.ok) throw new Error(body.error || "Failed to load file");
@@ -2176,13 +2340,14 @@ function renderInlineThread(cm, opts = {}) {
     `<button type="button" class="cm-action cm-done${isCmDone ? " on" : ""}" data-done>` +
     `${isCmDone ? "✓ Done" : "Mark done"}</button>`;
   // Resolve toggles thread state on GitHub; needs a token and a thread id.
-  const canResolve = tab && cm.threadId && healthInfo && healthInfo.githubToken;
+  const localOrToken = (tab && tab.kind === "branch") || (healthInfo && healthInfo.githubToken);
+  const canResolve = tab && cm.threadId && localOrToken;
   const resolveBtn = canResolve
     ? `<button type="button" class="cm-action cm-resolve${cm.resolved ? " on" : ""}" data-resolve>` +
       `${cm.resolved ? "Unresolve" : "Resolve"}</button>`
     : "";
   // Reply posts into this thread via the replies endpoint; needs a token.
-  const canReply = tab && healthInfo && healthInfo.githubToken;
+  const canReply = tab && localOrToken;
   const replyBtn = canReply
     ? `<button type="button" class="cm-action cm-reply" data-reply>Reply</button>`
     : "";
@@ -2361,7 +2526,8 @@ function openReplyComposer(threadEl, tab, cm) {
     posting = true;
     postBtn.disabled = true;
     try {
-      await postComment(tab, ta.value, { replyTo: cm.id }, box);
+      const replyTo = tab.kind === "branch" ? cm.threadId : cm.id;
+      await postComment(tab, ta.value, { replyTo }, box);
     } finally {
       posting = false;
       postBtn.disabled = false; // box is removed on success; matters only on failure
@@ -2447,7 +2613,7 @@ function renderConversation(tab) {
 
   el.querySelectorAll("[data-done-convo]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      toggleDone(tab, "convo", Number(btn.dataset.doneConvo));
+      toggleDone(tab, "convo", btn.dataset.doneConvo);
       renderConversation(tab);
       renderSidebar(tab); // refresh the "Hide done (N)" count in the review controls
     });
@@ -2465,22 +2631,33 @@ function renderConversation(tab) {
 async function postComment(tab, body, inline, composerEl) {
   body = (body || "").trim();
   if (!body) return;
-  const payload = {
-    owner: tab.owner,
-    repo: tab.repo,
-    number: tab.number,
-    body,
-  };
-  if (inline && inline.replyTo) {
-    payload.replyTo = inline.replyTo;
-  } else if (inline) {
-    payload.path = inline.path;
-    payload.line = inline.line;
-    payload.side = inline.side || "RIGHT";
-    payload.commitId = tab.data.headSha;
+
+  let url, payload;
+  if (tab.kind === "branch") {
+    url = "/api/branch/comment";
+    payload = { repoPath: tab.repoPath, base: tab.base, head: tab.head, body };
+    if (inline && inline.replyTo) {
+      payload.replyTo = inline.replyTo;          // a threadId (see openReplyComposer change)
+    } else if (inline) {
+      payload.path = inline.path;
+      payload.line = inline.line;
+      payload.side = inline.side || "RIGHT";
+    }
+  } else {
+    url = "/api/pr/comment";
+    payload = { owner: tab.owner, repo: tab.repo, number: tab.number, body };
+    if (inline && inline.replyTo) {
+      payload.replyTo = inline.replyTo;
+    } else if (inline) {
+      payload.path = inline.path;
+      payload.line = inline.line;
+      payload.side = inline.side || "RIGHT";
+      payload.commitId = tab.data.headSha;
+    }
   }
+
   try {
-    const r = await fetch("/api/pr/comment", {
+    const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -2499,11 +2676,15 @@ async function postComment(tab, body, inline, composerEl) {
 // done). Reloads comments afterward so the resolved state reflects GitHub.
 async function resolveThread(tab, cm) {
   if (!cm.threadId) return;
+  const url = tab.kind === "branch" ? "/api/branch/thread/resolve" : "/api/pr/thread/resolve";
+  const payload = tab.kind === "branch"
+    ? { repoPath: tab.repoPath, base: tab.base, head: tab.head, threadId: cm.threadId, resolved: !cm.resolved }
+    : { threadId: cm.threadId, resolved: !cm.resolved };
   try {
-    const r = await fetch("/api/pr/thread/resolve", {
+    const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ threadId: cm.threadId, resolved: !cm.resolved }),
+      body: JSON.stringify(payload),
     });
     const res = await r.json();
     if (!r.ok) throw new Error(res.error || "Failed to update thread");
@@ -2670,6 +2851,21 @@ async function runChecksFlow() {
 function buildPrContext() {
   const tab = state.active ? state.tabs.find((t) => t.key === state.active) : null;
   if (!tab) return "";
+
+  if (tab.kind === "branch") {
+    const range = `${tab.base}...${tab.head}`;
+    return (
+      "[Current branch review — the user is reviewing a local branch; there is no GitHub PR.]\n" +
+      `Repo checkout: ${tab.repoPath}\n` +
+      `Reviewing branch "${tab.head}" against base "${tab.base}" (diff is ${range}).\n` +
+      `Title: "${tab.title}"\n` +
+      "You are running inside this checkout. Use " +
+      `\`git diff ${range}\` for the full diff and \`git log ${tab.base}..${tab.head}\` ` +
+      "for the commits under review.\n" +
+      "[End current branch review]\n\n"
+    );
+  }
+
   const ref = `${tab.owner}/${tab.repo}#${tab.number}`;
   const url = tab.data && tab.data.url ? tab.data.url : "";
   return (

@@ -1,11 +1,40 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
+process.env.PR_STUDIO_STATE_DIR = mkdtempSync(join(tmpdir(), "indexroutes-state-"));
+
 import { app } from "./index.js";
 import { parsePrRef, repoFromUrl } from "./github.js";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+function gitCmd(cwd, args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+function makeTempRepo() {
+  const dir = mkdtempSync(join(tmpdir(), "indexroutes-repo-"));
+  gitCmd(dir, ["init", "-b", "main"]);
+  gitCmd(dir, ["config", "user.email", "test@example.com"]);
+  gitCmd(dir, ["config", "user.name", "Test User"]);
+
+  writeFileSync(join(dir, "foo.txt"), "line one\nline two\n");
+  gitCmd(dir, ["add", "foo.txt"]);
+  gitCmd(dir, ["commit", "-m", "Initial commit"]);
+
+  gitCmd(dir, ["checkout", "-b", "feature"]);
+  writeFileSync(join(dir, "foo.txt"), "line one\nline two\nline three\n");
+  writeFileSync(join(dir, "bar.txt"), "new file content\n");
+  gitCmd(dir, ["add", "foo.txt", "bar.txt"]);
+  gitCmd(dir, ["commit", "-m", "Add bar.txt and update foo.txt"]);
+
+  return dir;
+}
 
 let server;
 let baseUrl;
@@ -153,4 +182,116 @@ test("POST /api/pr/breakdown with no files returns 400", async () => {
   assert.strictEqual(res.status, 400);
   const body = await res.json();
   assert.ok(body.error);
+});
+
+// ---- Local branch review routes ----
+
+test("GET /api/branch/diff with missing base/head returns 400 JSON", async () => {
+  const res = await fetch(`${baseUrl}/api/branch/diff?repoPath=${encodeURIComponent(projectRoot)}`);
+  assert.strictEqual(res.status, 400);
+  const body = await res.json();
+  assert.strictEqual(typeof body.error, "string");
+});
+
+test("GET /api/branch/comments with missing base/head returns 400 JSON", async () => {
+  const res = await fetch(`${baseUrl}/api/branch/comments?repoPath=${encodeURIComponent(projectRoot)}`);
+  assert.strictEqual(res.status, 400);
+  const body = await res.json();
+  assert.strictEqual(typeof body.error, "string");
+});
+
+test("POST /api/branch/comment with empty body returns 400", async () => {
+  const res = await fetch(`${baseUrl}/api/branch/comment`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repoPath: projectRoot, base: "main", head: "feature", body: "" }),
+  });
+  assert.strictEqual(res.status, 400);
+  const body = await res.json();
+  assert.strictEqual(typeof body.error, "string");
+});
+
+test("POST /api/branch/thread/resolve with missing threadId returns 400", async () => {
+  const res = await fetch(`${baseUrl}/api/branch/thread/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repoPath: projectRoot, base: "main", head: "feature", resolved: true }),
+  });
+  assert.strictEqual(res.status, 400);
+  const body = await res.json();
+  assert.strictEqual(typeof body.error, "string");
+});
+
+test("branch review happy path: branches, diff, comment, resolve", async () => {
+  const repoPath = makeTempRepo();
+
+  // GET /api/branches
+  const branchesRes = await fetch(`${baseUrl}/api/branches?repoPath=${encodeURIComponent(repoPath)}`);
+  assert.strictEqual(branchesRes.status, 200);
+  const branchesBody = await branchesRes.json();
+  assert.strictEqual(branchesBody.current, "feature");
+  assert.ok(branchesBody.branches.includes("main"));
+  assert.ok(branchesBody.branches.includes("feature"));
+  assert.strictEqual(branchesBody.defaultBase, "main");
+
+  // GET /api/branch/diff
+  const diffRes = await fetch(
+    `${baseUrl}/api/branch/diff?repoPath=${encodeURIComponent(repoPath)}&base=main&head=feature`
+  );
+  assert.strictEqual(diffRes.status, 200);
+  const diffBody = await diffRes.json();
+  assert.strictEqual(diffBody.headRef, "feature");
+  assert.strictEqual(diffBody.baseRef, "main");
+  assert.ok(Array.isArray(diffBody.files));
+  assert.ok(diffBody.files.length > 0);
+  assert.strictEqual(diffBody.repoPath, repoPath);
+  assert.strictEqual(diffBody.base, "main");
+  assert.strictEqual(diffBody.head, "feature");
+
+  const changedFile = diffBody.files[0].filename;
+
+  // POST /api/branch/comment (inline)
+  const commentRes = await fetch(`${baseUrl}/api/branch/comment`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      repoPath,
+      base: "main",
+      head: "feature",
+      path: changedFile,
+      line: 1,
+      body: "note",
+    }),
+  });
+  assert.strictEqual(commentRes.status, 200);
+  const commentBody = await commentRes.json();
+  assert.strictEqual(commentBody.ok, true);
+
+  // GET /api/branch/comments
+  const commentsRes = await fetch(
+    `${baseUrl}/api/branch/comments?repoPath=${encodeURIComponent(repoPath)}&base=main&head=feature`
+  );
+  assert.strictEqual(commentsRes.status, 200);
+  const commentsBody = await commentsRes.json();
+  assert.strictEqual(commentsBody.inline.length, 1);
+  assert.strictEqual(commentsBody.inline[0].body, "note");
+  const threadId = commentsBody.inline[0].threadId;
+  assert.ok(threadId);
+
+  // POST /api/branch/thread/resolve
+  const resolveRes = await fetch(`${baseUrl}/api/branch/thread/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repoPath, base: "main", head: "feature", threadId, resolved: true }),
+  });
+  assert.strictEqual(resolveRes.status, 200);
+  const resolveBody = await resolveRes.json();
+  assert.strictEqual(resolveBody.ok, true);
+
+  // Re-GET comments — resolved should now be true
+  const commentsRes2 = await fetch(
+    `${baseUrl}/api/branch/comments?repoPath=${encodeURIComponent(repoPath)}&base=main&head=feature`
+  );
+  const commentsBody2 = await commentsRes2.json();
+  assert.strictEqual(commentsBody2.inline[0].resolved, true);
 });
