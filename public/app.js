@@ -2870,12 +2870,16 @@ function renderActivityBody(body, activity) {
   }
 }
 
-// Update the activity summary label with the step count.
+// Update the activity summary label with the step count. Notices (errors and
+// the session self-heal message) would otherwise be hidden in the default-
+// collapsed log — and an errored turn drops its answer bubble entirely — so
+// auto-expand the log whenever it carries one, keeping such messages visible.
 function updateActivitySummary(bubble) {
   const details = bubble.parentNode.querySelector(":scope > .agent-activity");
   if (!details) return;
   const n = details.querySelectorAll(".agent-activity-body .activity-step").length;
   details.querySelector(".agent-activity-summary").textContent = `Worked through ${n} step${n === 1 ? "" : "s"}`;
+  if (details.querySelector(".agent-activity-body .activity-step.notice")) details.open = true;
 }
 
 // Finalize a live agent run: ensure the activity block is painted, then render
