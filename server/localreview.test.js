@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseGitDiff, listBranches, getBranchDiff } from "./localreview.js";
+import { parseGitDiff, listBranches, getBranchDiff, getFileAtRef } from "./localreview.js";
 
 // --- A. parseGitDiff (pure) ----------------------------------------------
 
@@ -169,4 +169,18 @@ test("getBranchDiff: throws on an invalid ref", () => {
 test("listBranches: throws on a non-git directory", () => {
   const dir = mkdtempSync(join(tmpdir(), "localreview-nogit-"));
   assert.throws(() => listBranches(dir), /Not a git repository/);
+});
+
+test("getFileAtRef: returns file content at a given ref", () => {
+  const dir = makeTempRepo();
+  // foo.txt was modified on `feature`; assert each ref sees its own version.
+  assert.strictEqual(getFileAtRef(dir, "feature", "foo.txt").content, "line one\nline two\nline three\n");
+  assert.strictEqual(getFileAtRef(dir, "main", "foo.txt").content, "line one\nline two\n");
+  assert.strictEqual(getFileAtRef(dir, "feature", "bar.txt").content, "new file content\n");
+});
+
+test("getFileAtRef: throws on a missing path or invalid ref", () => {
+  const dir = makeTempRepo();
+  assert.throws(() => getFileAtRef(dir, "feature", "nope.txt"), /git show/);
+  assert.throws(() => getFileAtRef(dir, "no-such-ref", "foo.txt"), /Not a valid ref/);
 });

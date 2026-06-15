@@ -103,6 +103,18 @@ export function parseGitDiff(raw) {
   });
 }
 
+// Returns { content } for `path` at `ref` in repoPath, read straight from the
+// checkout via `git show <ref>:<path>` (mirrors github.js's getFileContent
+// shape so the frontend's markdown/notebook preview works for branch tabs).
+export function getFileAtRef(repoPath, ref, path) {
+  assertGitRepo(repoPath);
+  assertValidRef(repoPath, ref);
+  // `<ref>:<path>` is git's rev:path syntax (path is repo-root-relative). Args
+  // are passed as an array (never a shell string), so nothing is injectable.
+  const content = git(repoPath, ["show", `${ref}:${path}`]);
+  return { content };
+}
+
 // Returns { current, branches, defaultBase } for repoPath.
 export function listBranches(repoPath) {
   assertGitRepo(repoPath);

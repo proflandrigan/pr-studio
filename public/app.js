@@ -1857,10 +1857,13 @@ function buildPreviewElement(file, tab, content) {
   return root;
 }
 
-// Fetches a file's content at the PR's head SHA for markdown preview.
+// Fetches a file's content at the head SHA for markdown preview. Branch tabs
+// read straight from the local checkout (no GitHub); PR tabs go through GitHub.
 function fetchFileContent(tab, filename) {
   const ref = tab.data.headSha;
-  const url = `/api/pr/file?owner=${encodeURIComponent(tab.owner)}&repo=${encodeURIComponent(tab.repo)}&path=${encodeURIComponent(filename)}&ref=${encodeURIComponent(ref)}`;
+  const url = tab.kind === "branch"
+    ? `/api/branch/file?${new URLSearchParams({ repoPath: tab.repoPath, ref, path: filename })}`
+    : `/api/pr/file?owner=${encodeURIComponent(tab.owner)}&repo=${encodeURIComponent(tab.repo)}&path=${encodeURIComponent(filename)}&ref=${encodeURIComponent(ref)}`;
   return fetch(url).then(async (r) => {
     const body = await r.json();
     if (!r.ok) throw new Error(body.error || "Failed to load file");

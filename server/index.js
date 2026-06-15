@@ -30,7 +30,7 @@ import {
 import { runAgent, runBreakdown, CLAUDE_BIN } from "./agent.js";
 import { detectCheckCommand, runChecks } from "./checks.js";
 import { normalizeChunks } from "./breakdown.js";
-import { listBranches, getBranchDiff } from "./localreview.js";
+import { listBranches, getBranchDiff, getFileAtRef } from "./localreview.js";
 import {
   readReview,
   addInlineComment,
@@ -207,6 +207,18 @@ app.get(
     }
     const diff = getBranchDiff(repoPath, base, head);
     res.json({ ...diff, repoPath, base, head });
+  })
+);
+
+app.get(
+  "/api/branch/file",
+  wrap(async (req, res) => {
+    const repoPath = req.query.repoPath || process.env.DEFAULT_REPO_PATH;
+    const { path, ref } = req.query;
+    if (!repoPath || !path || !ref) {
+      throw Object.assign(new Error("repoPath, path, and ref are required."), { status: 400 });
+    }
+    res.json(getFileAtRef(repoPath, ref, path));
   })
 );
 

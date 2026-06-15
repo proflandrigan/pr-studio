@@ -113,11 +113,14 @@ question-only turns still work without a checkout. Commits and pushes stay manua
 
 ### Local branch review (no GitHub PR)
 
-A branch review mirrors a PR review against a local checkout. Five routes in
+A branch review mirrors a PR review against a local checkout. Six routes in
 `index.js` (all plain JSON via `wrap()`, all fully local — no token/network):
 `GET /api/branches` (list branches for the branch picker), `GET /api/branch/diff`
 (returns `getBranchDiff(...)` plus the echoed `repoPath/base/head` identity),
-`GET /api/branch/comments` (`toCommentsView(readReview(...))`),
+`GET /api/branch/file` (returns `getFileAtRef(...)` — a file's content at a ref
+read straight from the checkout via `git show <ref>:<path>`, mirroring
+`/api/pr/file` so markdown/notebook **Preview** works for branch tabs without
+GitHub), `GET /api/branch/comments` (`toCommentsView(readReview(...))`),
 `POST /api/branch/comment` (dispatches to `addReply`/`addInlineComment`/
 `addConversationComment` by which fields are present — `replyTo` is a **threadId**,
 `path`+`line` make a new inline thread, neither makes a conversation note), and
