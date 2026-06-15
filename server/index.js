@@ -2,6 +2,7 @@
 import process from "node:process";
 import express from "express";
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -235,9 +236,19 @@ app.post("/api/checks/run", (req, res) => {
 
 export { app };
 
-// Only start listening when run directly (node server/index.js), not when
-// imported by a test.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Only start listening when run directly (node server/index.js or the global
+// `pr-studio` bin), not when imported by a test. When installed globally the
+// bin is a symlink, so process.argv[1] is the symlink path while
+// import.meta.url resolves to the real file — resolve both before comparing.
+const invokedPath = (() => {
+  if (!process.argv[1]) return "";
+  try {
+    return realpathSync(process.argv[1]);
+  } catch {
+    return process.argv[1];
+  }
+})();
+if (invokedPath && realpathSync(fileURLToPath(import.meta.url)) === invokedPath) {
   app.listen(PORT, () => {
     console.log(`\n  PR Studio running → http://localhost:${PORT}\n`);
     if (!hasToken()) {
