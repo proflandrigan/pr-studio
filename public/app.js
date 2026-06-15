@@ -568,7 +568,9 @@ function wireEvents() {
 // lists dirs and we drop the chosen absolute path into #repoPath.
 let fsCurrentDir = null;
 
-async function loadFsDir(path) {
+// Returns true if the listing loaded, false if it failed. Pass silent=true to
+// suppress the inline error (used when the caller will fall back to another dir).
+async function loadFsDir(path, silent = false) {
   const url = path
     ? `/api/fs/list?path=${encodeURIComponent(path)}`
     : "/api/fs/list";
@@ -578,13 +580,15 @@ async function loadFsDir(path) {
     data = await res.json();
     if (!res.ok) throw new Error(data.error || "Could not read folder");
   } catch (e) {
-    // Surface the failure inline in the list rather than silently doing nothing.
-    $("fsList").innerHTML = "";
-    const li = document.createElement("li");
-    li.className = "fs-empty";
-    li.textContent = e.message || "Could not read folder";
-    $("fsList").appendChild(li);
-    return;
+    if (!silent) {
+      // Surface the failure inline in the list rather than silently doing nothing.
+      $("fsList").innerHTML = "";
+      const li = document.createElement("li");
+      li.className = "fs-empty";
+      li.textContent = e.message || "Could not read folder";
+      $("fsList").appendChild(li);
+    }
+    return false;
   }
   fsCurrentDir = data.path;
   $("fsCurrentPath").textContent = data.path;
@@ -599,7 +603,7 @@ async function loadFsDir(path) {
     li.className = "fs-empty";
     li.textContent = "No subfolders here — choose this folder, or go up.";
     list.appendChild(li);
-    return;
+    return true;
   }
   for (const entry of data.entries) {
     const li = document.createElement("li");
@@ -614,13 +618,17 @@ async function loadFsDir(path) {
     li.append(icon, name);
     list.appendChild(li);
   }
+  return true;
 }
 
-function openFsModal() {
+async function openFsModal() {
   $("fsModal").hidden = false;
   // Seed from the current field value if it looks like a path, else server default.
+  // If that path can't be listed (missing, or a file rather than a directory),
+  // fall back to the server default so the modal never opens into a dead end.
   const seed = repoPathEl.value.trim();
-  loadFsDir(seed || null);
+  const ok = await loadFsDir(seed || null, Boolean(seed));
+  if (!ok && seed) await loadFsDir(null);
 }
 
 function closeFsModal() {
