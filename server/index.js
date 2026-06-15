@@ -30,6 +30,15 @@ import {
 import { runAgent, runBreakdown, CLAUDE_BIN } from "./agent.js";
 import { detectCheckCommand, runChecks } from "./checks.js";
 import { normalizeChunks } from "./breakdown.js";
+import { listBranches, getBranchDiff } from "./localreview.js";
+import {
+  readReview,
+  addInlineComment,
+  addReply,
+  addConversationComment,
+  setThreadResolved,
+  toCommentsView,
+} from "./reviewstore.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -175,6 +184,78 @@ app.post(
     });
     const chunks = normalizeChunks(raw, files);
     res.json({ chunks });
+  })
+);
+
+// ---- Local branch review (no GitHub PR) ----
+
+app.get(
+  "/api/branches",
+  wrap(async (req, res) => {
+    const repoPath = req.query.repoPath || process.env.DEFAULT_REPO_PATH;
+    res.json(listBranches(repoPath));
+  })
+);
+
+app.get(
+  "/api/branch/diff",
+  wrap(async (req, res) => {
+    const repoPath = req.query.repoPath || process.env.DEFAULT_REPO_PATH;
+    const { base, head } = req.query;
+    if (!base || !head) {
+      throw Object.assign(new Error("base and head are required."), { status: 400 });
+    }
+    const diff = getBranchDiff(repoPath, base, head);
+    res.json({ ...diff, repoPath, base, head });
+  })
+);
+
+app.get(
+  "/api/branch/comments",
+  wrap(async (req, res) => {
+    const repoPath = req.query.repoPath || process.env.DEFAULT_REPO_PATH;
+    const { base, head } = req.query;
+    if (!base || !head) {
+      throw Object.assign(new Error("base and head are required."), { status: 400 });
+    }
+    res.json(toCommentsView(readReview(repoPath, base, head)));
+  })
+);
+
+app.post(
+  "/api/branch/comment",
+  wrap(async (req, res) => {
+    const { base, head, body, path, line, side, replyTo } = req.body || {};
+    const repoPath = req.body?.repoPath || process.env.DEFAULT_REPO_PATH;
+    if (!repoPath || !base || !head) {
+      throw Object.assign(new Error("repoPath, base, and head are required."), { status: 400 });
+    }
+    if (!body || !body.trim()) {
+      res.status(400).json({ error: "Comment body is empty." });
+      return;
+    }
+    let result;
+    if (replyTo) {
+      result = addReply({ repoPath, base, head, threadId: replyTo, body });
+    } else if (path && line) {
+      result = addInlineComment({ repoPath, base, head, path, line: Number(line), side: side || "RIGHT", body });
+    } else {
+      result = addConversationComment({ repoPath, base, head, body });
+    }
+    res.json({ ok: true, ...result });
+  })
+);
+
+app.post(
+  "/api/branch/thread/resolve",
+  wrap(async (req, res) => {
+    const { base, head, threadId, resolved } = req.body || {};
+    const repoPath = req.body?.repoPath || process.env.DEFAULT_REPO_PATH;
+    if (!repoPath || !base || !head || !threadId) {
+      throw Object.assign(new Error("repoPath, base, head, and threadId are required."), { status: 400 });
+    }
+    const result = setThreadResolved({ repoPath, base, head, threadId, resolved: resolved !== false });
+    res.json({ ok: true, ...result });
   })
 );
 

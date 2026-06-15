@@ -10,6 +10,11 @@ proxies the GitHub REST API, and spawns `claude -p` (Claude Code headless mode)
 inside a local repo checkout so the agent can read/edit files and stream output
 back to the browser.
 
+It also supports **local branch review** — pointing at a local checkout and
+diffing a branch against a base (`git diff base...head`) like a PR, with durable
+comments stored on disk, **no GitHub PR required** (see "Local branch review"
+below).
+
 ## Commands
 
 ```bash
@@ -36,10 +41,14 @@ or the real environment:
   no per-PR path set.
 - `PORT` — default 4317.
 - `CLAUDE_BIN` — override the `claude` binary name/path (see `server/agent.js`).
+- `PR_STUDIO_STATE_DIR` — where local branch-review comments persist. Defaults to
+  `$XDG_CONFIG_HOME/pr-studio` (else `~/.config/pr-studio`); comments live under
+  `reviews/`. Mainly a test hook (`reviewstore.js` reads it lazily so tests point
+  it at a temp dir). Never written into the user's repo.
 
 ## Architecture
 
-Four backend modules, each a focused concern, wired together in `index.js`:
+Backend modules, each a focused concern, wired together in `index.js`:
 
 - **`server/index.js`** — Express app. JSON API + static file serving. The
   `wrap()` helper turns thrown errors (with optional `err.status`) into JSON
@@ -72,6 +81,22 @@ Four backend modules, each a focused concern, wired together in `index.js`:
   checkout, streaming output back. Exit code 0 = pass. Surfaced via
   `GET /api/checks/detect` and the streaming `POST /api/checks/run` (the second
   text/plain streaming endpoint besides `/api/agent`).
+- **`server/localreview.js`** — local branch review's git half (no GitHub).
+  `parseGitDiff()` (pure, unit-tested) turns `git diff` stdout into the same
+  per-file `{ filename, status, additions, deletions, patch }` shape `github.js`
+  produces, so the frontend renders it unchanged. `listBranches(repoPath)` →
+  `{ current, branches, defaultBase }`; `getBranchDiff(repoPath, base, head)`
+  shells `git diff --find-renames base...head` (merge-base, like a PR) into a
+  PR-shaped object. All git calls use `execFileSync` with an args array (never a
+  shell string) so branch names can't be injected.
+- **`server/reviewstore.js`** — local branch review's comment half. Durably
+  persists conversation + inline comment **threads** (with replies and
+  resolve state) as one JSON file per `(repoPath, base, head)` under the state
+  dir (see `PR_STUDIO_STATE_DIR`), keyed by a hash so arbitrary branch names are
+  filesystem-safe. `toCommentsView()` (pure) flattens stored threads into the
+  exact `{ conversation, inline }` shape the frontend already renders for PR
+  comments — each inline item carries its `threadId` (the reply/resolve key) and
+  `resolved`. Author is stamped from `git config user.name`.
 
 **Agent capability** is governed by `AGENT_TOOLS` in `agent.js` — there is no
 review/fix toggle. The chat agent always gets the full, edit-capable tool set
@@ -85,6 +110,32 @@ place that governs its capability. `resolveAgentCwd` runs the agent in the user'
 checkout when the repo path is valid, and falls back to a temp dir otherwise so
 question-only turns still work without a checkout. Commits and pushes stay manual
 (the tool never commits for the user).
+
+### Local branch review (no GitHub PR)
+
+A branch review mirrors a PR review against a local checkout. Five routes in
+`index.js` (all plain JSON via `wrap()`, all fully local — no token/network):
+`GET /api/branches` (list branches for the branch picker), `GET /api/branch/diff`
+(returns `getBranchDiff(...)` plus the echoed `repoPath/base/head` identity),
+`GET /api/branch/comments` (`toCommentsView(readReview(...))`),
+`POST /api/branch/comment` (dispatches to `addReply`/`addInlineComment`/
+`addConversationComment` by which fields are present — `replyTo` is a **threadId**,
+`path`+`line` make a new inline thread, neither makes a conversation note), and
+`POST /api/branch/thread/resolve`.
+
+The frontend models a branch review as a tab with **`kind: "branch"`** (vs the
+default `"pr"`). Its `data` is the PR-shaped diff object, so sidebar/file-tree/
+diff rendering is reused verbatim; only tab identity, persistence, comment
+routing, and a few GitHub-only header bits branch on `kind`. Branch tabs are keyed
+by `keyForBranch(repoPath, base, head)` (`branch:<path>@<base>...<head>`), opened
+by `openBranchReview()` (exposed on `window` for the Branches control), persisted
+under a separate `branchRefs` list (PR tabs stay in `refs`), and restored on load.
+The **"Branches"** top-bar button (mirrors **My PRs**) opens a panel to pick a
+repo path (via the shared folder picker, now targetable through `openFsModalFor`),
+head, and base, then launches the review. Comment posting/replying/resolving and
+the chat agent + Run checks all work at full parity — `postComment`/
+`resolveThread` route to the `/api/branch/*` endpoints for branch tabs, and
+Resolve/Reply need no GitHub token there.
 
 ### Frontend (`public/app.js`, vanilla JS, no framework)
 
@@ -133,7 +184,10 @@ it up itself even with no local checkout — without it a checkout-less turn lan
 (`resume === false`); later turns resume a Claude Code session that already carries
 that context, so re-sending it would just waste tokens. `buildPinnedContext()`, by
 contrast, is sent **every turn** because the user's pinned diff lines change message
-to message.
+to message. For a branch-review tab (`kind === "branch"`), `buildPrContext()` emits
+a **"Current branch review"** block instead — the repo checkout path and the
+`base...head` range, nudging the agent to `git diff base...head` in the checkout it
+already runs in.
 
 ### Request flow
 
