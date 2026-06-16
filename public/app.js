@@ -603,7 +603,11 @@ function wireEvents() {
     loadBranchesPanel();
   });
   document.addEventListener("click", (e) => {
-    if (!e.target.closest(".branches-wrap")) branchesPanel.hidden = true;
+    // Ignore clicks inside the folder picker overlay — it's a top-level sibling
+    // of .branches-wrap, so without this guard choosing a folder would hide the
+    // Branches panel before its branch selects could be seen.
+    if (e.target.closest(".branches-wrap") || e.target.closest(".fs-overlay")) return;
+    branchesPanel.hidden = true;
   });
 
   document.addEventListener("click", (e) => {
