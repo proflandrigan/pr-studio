@@ -3,8 +3,9 @@
 // in github.js so the frontend's existing diff rendering works unchanged.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { userInfo } from "node:os";
+import { join } from "node:path";
 
 // Run a git command in repoPath and return trimmed stdout, or throw a clean
 // Error with .status = 400 on failure (mirrors github.js's err.status style).
@@ -133,6 +134,84 @@ export function listBranches(repoPath) {
   }
 
   return { current, branches, defaultBase };
+}
+
+// Synthesize a `git diff`-style section for an untracked (new) file so it parses
+// the same as a tracked addition. Pure — caller supplies the file's text.
+export function synthUntrackedDiff(path, content) {
+  const text = content.endsWith("\n") ? content.slice(0, -1) : content;
+  const lines = content.length === 0 ? [] : text.split("\n");
+  const n = lines.length;
+  const body = lines.map((l) => "+" + l).join("\n");
+  return (
+    `diff --git a/${path} b/${path}\n` +
+    "new file mode 100644\n" +
+    "--- /dev/null\n" +
+    `+++ b/${path}\n` +
+    `@@ -0,0 +1,${n} @@\n` +
+    body
+  );
+}
+
+// Returns a PR-shaped diff object for all working-tree changes in repoPath
+// (staged + unstaged tracked changes, plus untracked files). Mirrors the shape
+// returned by getBranchDiff() so the frontend renders it unchanged.
+export function getWorkingDiff(repoPath) {
+  assertGitRepo(repoPath);
+
+  // Tracked changes vs the last commit (staged + unstaged). Fall back to a plain
+  // `git diff` if there is no HEAD yet (a repo with no commits).
+  let tracked;
+  try {
+    tracked = git(repoPath, ["diff", "--no-color", "--find-renames", "HEAD"]);
+  } catch {
+    tracked = git(repoPath, ["diff", "--no-color", "--find-renames"]);
+  }
+  const files = parseGitDiff(tracked);
+
+  // Untracked files (agent `Write` output) are invisible to `git diff`; synthesize
+  // them as additions. Binary files (NUL byte) get a patch-less "added" entry.
+  const others = git(repoPath, ["ls-files", "--others", "--exclude-standard"])
+    .split("\n").map((s) => s.trim()).filter(Boolean);
+  for (const rel of others) {
+    let buf;
+    try {
+      buf = readFileSync(join(repoPath, rel));
+    } catch {
+      continue; // vanished between listing and read — skip
+    }
+    if (buf.includes(0)) {
+      files.push({ filename: rel, status: "added", additions: 0, deletions: 0, patch: null });
+      continue;
+    }
+    files.push(parseGitDiff(synthUntrackedDiff(rel, buf.toString("utf8")))[0]);
+  }
+
+  // author resolution — copy verbatim from getBranchDiff
+  let author;
+  try { author = git(repoPath, ["config", "user.name"]).trim() || null; } catch { author = null; }
+  if (!author) {
+    try { author = userInfo().username || "local"; } catch { author = "local"; }
+  }
+
+  let headSha = "";
+  try { headSha = git(repoPath, ["rev-parse", "HEAD"]).trim(); } catch { headSha = ""; }
+
+  return {
+    title: "Working changes",
+    state: "open",
+    draft: false,
+    author,
+    body: "",
+    headRef: "working tree",
+    baseRef: "HEAD",
+    headSha,
+    baseSha: headSha,
+    additions: files.reduce((s, f) => s + f.additions, 0),
+    deletions: files.reduce((s, f) => s + f.deletions, 0),
+    changedFiles: files.length,
+    files,
+  };
 }
 
 // Returns a PR-shaped diff object for `base...head` in repoPath.

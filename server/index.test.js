@@ -222,6 +222,13 @@ test("POST /api/branch/thread/resolve with missing threadId returns 400", async 
   assert.strictEqual(typeof body.error, "string");
 });
 
+test("GET /api/working/diff with no repoPath returns 400 JSON", async () => {
+  const res = await fetch(`${baseUrl}/api/working/diff`);
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.ok(body.error);
+});
+
 test("branch review happy path: branches, diff, comment, resolve", async () => {
   const repoPath = makeTempRepo();
 

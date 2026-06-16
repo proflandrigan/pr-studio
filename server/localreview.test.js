@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseGitDiff, listBranches, getBranchDiff, getFileAtRef } from "./localreview.js";
+import { parseGitDiff, synthUntrackedDiff, listBranches, getBranchDiff, getFileAtRef } from "./localreview.js";
 
 // --- A. parseGitDiff (pure) ----------------------------------------------
 
@@ -107,6 +107,22 @@ Binary files a/image.png and b/image.png differ
 
 test("parseGitDiff: empty string returns empty array", () => {
   assert.deepStrictEqual(parseGitDiff(""), []);
+});
+
+test("synthUntrackedDiff produces a parseable added-file section", () => {
+  const parsed = parseGitDiff(synthUntrackedDiff("dir/new.js", "line1\nline2\n"));
+  assert.strictEqual(parsed.length, 1);
+  assert.strictEqual(parsed[0].filename, "dir/new.js");
+  assert.strictEqual(parsed[0].status, "added");
+  assert.strictEqual(parsed[0].additions, 2);
+  assert.ok(parsed[0].patch.includes("+line1"));
+});
+
+test("synthUntrackedDiff handles an empty file", () => {
+  const parsed = parseGitDiff(synthUntrackedDiff("empty.txt", ""));
+  assert.strictEqual(parsed[0].filename, "empty.txt");
+  assert.strictEqual(parsed[0].status, "added");
+  assert.strictEqual(parsed[0].additions, 0);
 });
 
 // --- B. listBranches + getBranchDiff (integration via temp git repo) ----

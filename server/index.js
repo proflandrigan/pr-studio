@@ -30,7 +30,7 @@ import {
 import { runAgent, runBreakdown, CLAUDE_BIN } from "./agent.js";
 import { detectCheckCommand, runChecks } from "./checks.js";
 import { normalizeChunks } from "./breakdown.js";
-import { listBranches, getBranchDiff, getFileAtRef } from "./localreview.js";
+import { listBranches, getBranchDiff, getFileAtRef, getWorkingDiff } from "./localreview.js";
 import {
   readReview,
   addInlineComment,
@@ -207,6 +207,15 @@ app.get(
     }
     const diff = getBranchDiff(repoPath, base, head);
     res.json({ ...diff, repoPath, base, head });
+  })
+);
+
+app.get(
+  "/api/working/diff",
+  wrap(async (req, res) => {
+    const repoPath = req.query.repoPath || process.env.DEFAULT_REPO_PATH;
+    const diff = getWorkingDiff(repoPath);
+    res.json({ ...diff, repoPath });
   })
 );
 
