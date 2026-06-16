@@ -2631,6 +2631,9 @@ function buildDiffElement(file, tab) {
 // A small toolbar above the diff summarising resolved/outdated inline threads
 // and a toggle to reveal resolved ones (hidden by default, like GitHub).
 function renderReviewControls(tab) {
+  // Working view doesn't render PR/branch comments, so its resolved/done/outdated
+  // toggles would control nothing — hide the toolbar there.
+  if (tab.viewMode === "working") return "";
   const inline = (tab.comments && tab.comments.inline) || [];
   const resolved = inline.filter((c) => c.resolved).length;
   const outdated = inline.filter((c) => c.outdated).length;
@@ -2674,6 +2677,11 @@ function visibleInline(tab) {
 function inlineCommentsByLine(tab, filename) {
   const right = new Map();
   const left = new Map();
+  // The "Agent's changes" working view has its own feedback mechanism (queued
+  // chips) and a different line-number space than the PR/branch diff. PR review
+  // comments are anchored to the review diff's lines, so drawing them here would
+  // pin them onto unrelated working-tree lines — suppress them entirely.
+  if (tab.viewMode === "working") return { right, left };
   for (const cm of visibleInline(tab)) {
     if (cm.path !== filename) continue;
     const side = cm.line != null ? cm.side : cm.originalSide || cm.side;
