@@ -229,6 +229,25 @@ test("GET /api/working/diff with no repoPath returns 400 JSON", async () => {
   assert.ok(body.error);
 });
 
+test("GET /api/working/file with no path returns 400 JSON", async () => {
+  const repoPath = makeTempRepo();
+  const res = await fetch(`${baseUrl}/api/working/file?repoPath=${encodeURIComponent(repoPath)}`);
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.ok(body.error);
+});
+
+test("GET /api/working/file returns the uncommitted working-tree content", async () => {
+  const repoPath = makeTempRepo();
+  writeFileSync(join(repoPath, "foo.txt"), "uncommitted edit\n");
+  const res = await fetch(
+    `${baseUrl}/api/working/file?repoPath=${encodeURIComponent(repoPath)}&path=foo.txt`
+  );
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.content, "uncommitted edit\n");
+});
+
 test("branch review happy path: branches, diff, comment, resolve", async () => {
   const repoPath = makeTempRepo();
 

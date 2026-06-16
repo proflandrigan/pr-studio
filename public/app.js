@@ -1189,6 +1189,10 @@ async function loadWorkingDiff(tab) {
     if (!res.ok) throw new Error(data.error || "Failed to load working changes.");
     tab.workingData = data;
     tab.workingError = null;
+    // The agent may have re-edited a file we already cached the content of (this
+    // runs after every agent turn). Drop the cache so the full-file/preview view
+    // refetches the latest working-tree bytes instead of showing stale content.
+    tab.fileContents = {};
   } catch (e) {
     tab.workingData = null;
     tab.workingError = e.message;
@@ -1204,6 +1208,10 @@ async function loadWorkingDiff(tab) {
 function setDiffView(tab, mode) {
   if ((tab.viewMode || "review") === mode) return;
   tab.viewMode = mode;
+  // Cached file content is keyed by filename only and the two views resolve the
+  // same filename to different bytes (committed vs working tree), so drop the
+  // cache on every switch to avoid serving the other view's content.
+  tab.fileContents = {};
   tab.selected = OVERVIEW;
   tab.selectedSecondary = null;
   tab.activePane = "primary";
@@ -2026,9 +2034,22 @@ function buildPreviewElement(file, tab, content) {
   return root;
 }
 
-// Fetches a file's content at the head SHA for markdown preview. Branch tabs
-// read straight from the local checkout (no GitHub); PR tabs go through GitHub.
+// Fetches a file's content for full-file/markdown preview. The working
+// ("Agent's changes") view reads the on-disk working tree — the agent's
+// uncommitted edits and created files — so it must NOT go through any committed
+// ref (HEAD would show the pre-edit version, or 404 a newly-created file).
+// Branch tabs read from the local checkout at the head SHA; PR tabs go through
+// GitHub.
 function fetchFileContent(tab, filename) {
+  if (tab.viewMode === "working") {
+    const repoPath = (state.repoPaths[tab.key] || repoPathEl.value || "").trim();
+    const url = `/api/working/file?${new URLSearchParams({ repoPath, path: filename })}`;
+    return fetch(url).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || "Failed to load file");
+      return body.content;
+    });
+  }
   const ref = activeData(tab).headSha;
   const url = tab.kind === "branch"
     ? `/api/branch/file?${new URLSearchParams({ repoPath: tab.repoPath, ref, path: filename })}`

@@ -5,7 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { userInfo } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 // Run a git command in repoPath and return trimmed stdout, or throw a clean
 // Error with .status = 400 on failure (mirrors github.js's err.status style).
@@ -113,6 +113,28 @@ export function getFileAtRef(repoPath, ref, path) {
   // `<ref>:<path>` is git's rev:path syntax (path is repo-root-relative). Args
   // are passed as an array (never a shell string), so nothing is injectable.
   const content = git(repoPath, ["show", `${ref}:${path}`]);
+  return { content };
+}
+
+// Returns { content } for `path` read from repoPath's WORKING TREE (the actual
+// on-disk bytes, including the agent's uncommitted edits and untracked files) —
+// not any committed ref. This is what the "Agent's changes" full-file / preview
+// views need: `git show HEAD:<path>` would return the pre-edit version (or fail
+// for an agent-created file). `path` is repo-root-relative; it's resolved and
+// checked to stay inside the checkout so a crafted query can't read elsewhere.
+export function getWorkingFile(repoPath, path) {
+  assertGitRepo(repoPath);
+  const root = resolve(repoPath);
+  const full = resolve(root, path || "");
+  if (full !== root && !full.startsWith(root + sep)) {
+    throw Object.assign(new Error(`Path escapes repository: ${path}`), { status: 400 });
+  }
+  let content;
+  try {
+    content = readFileSync(full, "utf8");
+  } catch (e) {
+    throw Object.assign(new Error(`Cannot read ${path}: ${e.message}`), { status: 400 });
+  }
   return { content };
 }
 
