@@ -2759,8 +2759,10 @@ function renderInlineThread(cm, opts = {}) {
   const replyBtn = canReply
     ? `<button type="button" class="cm-action cm-reply" data-reply>Reply</button>`
     : "";
+  const agentBtn =
+    `<button type="button" class="cm-action cm-agent" data-agent>Address with agent</button>`;
   el.innerHTML = `
-    <div class="comment-head">@${esc(cm.author)}${badges}${where}<span class="cm-actions">${resolveBtn}${replyBtn}${doneBtn}</span></div>
+    <div class="comment-head">@${esc(cm.author)}${badges}${where}<span class="cm-actions">${resolveBtn}${replyBtn}${agentBtn}${doneBtn}</span></div>
     <div class="comment-body">${esc(cm.body)}</div>`;
 
   if (tab) {
@@ -2779,6 +2781,11 @@ function renderInlineThread(cm, opts = {}) {
     if (replybtn) replybtn.addEventListener("click", (e) => {
       e.stopPropagation();
       openReplyComposer(el, tab, cm);
+    });
+    const abtn = el.querySelector("[data-agent]");
+    if (abtn) abtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      addressCommentInChat(tab, cm);
     });
   }
   return el;
@@ -3048,6 +3055,49 @@ function openReplyComposer(threadEl, tab, cm) {
   ta.focus();
 }
 
+// Opens a composer beneath a top-level conversation comment to post a quoted
+// reply. GitHub conversation comments are a flat list, so a "reply" is a new
+// comment that quotes the parent. Routes through postComment with inline = null.
+function openConvoReplyComposer(threadEl, tab, cm) {
+  // one composer at a time
+  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  const box = document.createElement("div");
+  box.className = "inline-composer";
+  box.innerHTML = `
+    <textarea placeholder="Reply to @${esc(cm.author)} — Cmd/Ctrl+Enter to post"></textarea>
+    <button class="btn accent" type="button">Reply</button>
+    <button class="btn ghost" type="button">Cancel</button>
+  `;
+  const ta = box.querySelector("textarea");
+  const [postBtn, cancelBtn] = box.querySelectorAll("button");
+  let posting = false;
+  const post = async () => {
+    if (posting) return;
+    posting = true;
+    postBtn.disabled = true;
+    try {
+      const text = ta.value.trim();
+      if (!text) return;
+      // GitHub conversation comments are a flat list; quote the parent so it reads
+      // like a reply.
+      const quoted = `> @${cm.author}: ${cm.body}`.replace(/\n/g, "\n> ");
+      const body = `${quoted}\n\n${text}`;
+      await postComment(tab, body, null, box);
+    } finally {
+      posting = false;
+      postBtn.disabled = false; // box is removed on success; matters only on failure
+    }
+  };
+  postBtn.addEventListener("click", post);
+  cancelBtn.addEventListener("click", () => box.remove());
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") post();
+    if (e.key === "Escape") box.remove();
+  });
+  threadEl.insertAdjacentElement("afterend", box);
+  ta.focus();
+}
+
 // Opens a composer for a notebook cell that has no overlapping diff line
 // (or whose notebook has no patch at all). Posts a top-level conversation
 // comment prefixed with a reference to the cell, since GitHub inline review
@@ -3080,17 +3130,39 @@ function openNotebookCellComposer(cellEl, file, tab, cellIndex, cellType) {
   ta.focus();
 }
 
+function addressCommentInChat(tab, cm) {
+  if (!tab) return;
+  const convo = conversationFor(tab.key);
+  convo.open = true;
+  persist();
+  consoleEl.classList.remove("collapsed");
+  renderTranscript(tab.key);
+  renderPins();
+  const author = cm.author || "reviewer";
+  const where = cm.path
+    ? `on \`${cm.path}\`:${cm.line ?? cm.originalLine ?? "?"}`
+    : "";
+  const prompt =
+    `Address this review comment${where ? " " + where : ""}:\n\n` +
+    `> @${author}: ${cm.body || ""}\n\n`;
+  const input = $("agentInput");
+  input.value = prompt;
+  input.focus();
+}
+
 function renderConversation(tab) {
   const el = $("convo");
   const c = tab.comments;
   let html = `<h2>Conversation</h2>`;
+  // Hoist `all` so handler-wiring below (outside the else block) can reach it.
+  let all = [];
 
   if (!c) {
     html += `<div class="notice info">Loading comments…</div>`;
   } else {
     // Inline (code-review) comments render in the diff next to their line; the
     // conversation section is only top-level PR comments.
-    let all = [...(c.conversation || [])].sort(
+    all = [...(c.conversation || [])].sort(
       (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
     );
     if (state.hideDone) all = all.filter((cm) => !isDone(tab, "convo", cm.id));
@@ -3100,9 +3172,12 @@ function renderConversation(tab) {
     } else {
       for (const cm of all) {
         const d = isDone(tab, "convo", cm.id);
+        const replyBtn = `<button type="button" class="cm-action cm-reply" data-reply-convo="${cm.id}">Reply</button>`;
+        const agentBtn = `<button type="button" class="cm-action cm-agent" data-agent-convo="${cm.id}">Address with agent</button>`;
+        const doneBtn = `<button type="button" class="cm-action cm-done${d ? " on" : ""}" data-done-convo="${cm.id}">${d ? "✓ Done" : "Mark done"}</button>`;
         html += `
           <div class="comment${d ? " done" : ""}">
-            <div class="comment-head">@${esc(cm.author)}<span class="cm-actions"><button type="button" class="cm-action cm-done${d ? " on" : ""}" data-done-convo="${cm.id}">${d ? "✓ Done" : "Mark done"}</button></span></div>
+            <div class="comment-head">@${esc(cm.author)}<span class="cm-actions">${replyBtn}${agentBtn}${doneBtn}</span></div>
             <div class="comment-body">${esc(cm.body)}</div>
           </div>`;
       }
@@ -3121,6 +3196,20 @@ function renderConversation(tab) {
       toggleDone(tab, "convo", btn.dataset.doneConvo);
       renderConversation(tab);
       renderSidebar(tab); // refresh the "Hide done (N)" count in the review controls
+    });
+  });
+
+  el.querySelectorAll("[data-reply-convo]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cm = all.find((c) => String(c.id) === btn.dataset.replyConvo);
+      if (cm) openConvoReplyComposer(btn.closest(".comment"), tab, cm);
+    });
+  });
+
+  el.querySelectorAll("[data-agent-convo]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cm = all.find((c) => String(c.id) === btn.dataset.agentConvo);
+      if (cm) addressCommentInChat(tab, cm);
     });
   });
 
