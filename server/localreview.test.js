@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseGitDiff, listBranches, getBranchDiff, getFileAtRef } from "./localreview.js";
+import { parseGitDiff, synthUntrackedDiff, listBranches, getBranchDiff, getFileAtRef, getWorkingFile } from "./localreview.js";
 
 // --- A. parseGitDiff (pure) ----------------------------------------------
 
@@ -109,6 +109,22 @@ test("parseGitDiff: empty string returns empty array", () => {
   assert.deepStrictEqual(parseGitDiff(""), []);
 });
 
+test("synthUntrackedDiff produces a parseable added-file section", () => {
+  const parsed = parseGitDiff(synthUntrackedDiff("dir/new.js", "line1\nline2\n"));
+  assert.strictEqual(parsed.length, 1);
+  assert.strictEqual(parsed[0].filename, "dir/new.js");
+  assert.strictEqual(parsed[0].status, "added");
+  assert.strictEqual(parsed[0].additions, 2);
+  assert.ok(parsed[0].patch.includes("+line1"));
+});
+
+test("synthUntrackedDiff handles an empty file", () => {
+  const parsed = parseGitDiff(synthUntrackedDiff("empty.txt", ""));
+  assert.strictEqual(parsed[0].filename, "empty.txt");
+  assert.strictEqual(parsed[0].status, "added");
+  assert.strictEqual(parsed[0].additions, 0);
+});
+
 // --- B. listBranches + getBranchDiff (integration via temp git repo) ----
 
 function gitCmd(cwd, args) {
@@ -164,6 +180,22 @@ test("getBranchDiff: returns PR-shaped diff for feature vs main", () => {
 test("getBranchDiff: throws on an invalid ref", () => {
   const dir = makeTempRepo();
   assert.throws(() => getBranchDiff(dir, "main", "no-such-branch"), /no-such-branch/);
+});
+
+test("getWorkingFile: reads the working-tree bytes, not the committed version", () => {
+  const dir = makeTempRepo();
+  // Uncommitted edit to a tracked file + a brand-new untracked file.
+  writeFileSync(join(dir, "foo.txt"), "edited working content\n");
+  writeFileSync(join(dir, "created.txt"), "agent made this\n");
+
+  assert.strictEqual(getWorkingFile(dir, "foo.txt").content, "edited working content\n");
+  // git show HEAD:created.txt would fail; the working-tree read must succeed.
+  assert.strictEqual(getWorkingFile(dir, "created.txt").content, "agent made this\n");
+});
+
+test("getWorkingFile: rejects a path that escapes the repository", () => {
+  const dir = makeTempRepo();
+  assert.throws(() => getWorkingFile(dir, "../../etc/passwd"), /escapes repository/);
 });
 
 test("listBranches: throws on a non-git directory", () => {

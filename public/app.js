@@ -12,6 +12,7 @@ const state = {
   hideDone: false, // view toggle: hide locally-done comments
   breakdowns: {}, // key -> { chunks, reviewed: number[] }
   pins: {}, // key -> [ { id, file, side, startLine, endLine, code } ]
+  feedback: {}, // key -> [ {id, file, line, side, code, note} ] — transient, NOT persisted (consumed each agent turn)
   conversations: {}, // key -> { sessionId, started, open, turns: [ { role, text } ] }
   consoleHeight: null, // px height of the agent console, persisted from drag-resize
   bootId: null, // last-seen server boot id; a change across loads means npm start re-ran
@@ -94,6 +95,38 @@ function removePin(key, id) {
     list.splice(i, 1);
     persist();
   }
+}
+
+function feedbackFor(key) {
+  if (!key) return [];
+  if (!state.feedback[key]) state.feedback[key] = [];
+  return state.feedback[key];
+}
+
+function addFeedback(key, item) {
+  if (!key || !item) return null;
+  const list = feedbackFor(key);
+  const full = {
+    id: `fb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    file: item.file,
+    line: item.line,
+    side: item.side || "RIGHT",
+    code: item.code || "",
+    note: item.note || "",
+  };
+  list.push(full);
+  return full;
+}
+
+function removeFeedback(key, id) {
+  const list = state.feedback[key];
+  if (!list) return;
+  const i = list.findIndex((f) => f.id === id);
+  if (i !== -1) list.splice(i, 1);
+}
+
+function clearFeedback(key) {
+  if (state.feedback[key]) state.feedback[key] = [];
 }
 
 function persist() {
@@ -284,6 +317,35 @@ function renderPins() {
     chip.querySelector(".pin-chip-x").addEventListener("click", () => {
       removePin(state.active, pin.id);
       renderPins();
+    });
+    host.appendChild(chip);
+  }
+}
+
+// Render the active tab's queued working-diff feedback as removable chips above
+// the chat input. Each item is feedback on one changed line that will be fed to
+// the agent on the next turn. Mirrors renderPins(), but feedback is transient.
+function renderFeedback() {
+  const host = document.getElementById("feedbackChips");
+  if (!host) return;
+  const items = state.active ? feedbackFor(state.active) : [];
+  host.innerHTML = "";
+  if (items.length === 0) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  for (const fb of items) {
+    const name = String(fb.file || "").split("/").pop();
+    const chip = document.createElement("span");
+    chip.className = "feedback-chip";
+    chip.title = `${fb.file}:${fb.line} — ${fb.note}`;
+    chip.innerHTML =
+      `<span class="feedback-chip-label">💬 ${esc(name)}:${esc(String(fb.line))}</span>` +
+      `<button type="button" class="feedback-chip-x" aria-label="Remove feedback">×</button>`;
+    chip.querySelector(".feedback-chip-x").addEventListener("click", () => {
+      removeFeedback(state.active, fb.id);
+      renderFeedback();
     });
     host.appendChild(chip);
   }
@@ -1077,6 +1139,7 @@ function closeTab(key) {
     showEmpty();
   }
   renderPins();
+  renderFeedback();
   persist();
 }
 
@@ -1087,6 +1150,7 @@ function activate(key) {
   renderTabs();
   renderReview();
   renderPins();
+  renderFeedback();
   renderTranscript(key);
   persist();
   refreshCheckCmd();
@@ -1102,34 +1166,110 @@ function showEmpty() {
 // instead of a file diff.
 const OVERVIEW = "__overview__";
 
+// Which diff object the viewer is currently showing: the PR/branch review diff
+// (default) or the working-tree diff (the agent's own uncommitted changes).
+function activeData(tab) {
+  return tab && tab.viewMode === "working" ? tab.workingData : (tab ? tab.data : null);
+}
+
+// Fetch the checkout's working-tree diff for this tab and re-render if it's the
+// active tab. Stores the PR-shaped result on tab.workingData. Sets tab.workingError
+// when there's no repo path or the fetch fails.
+async function loadWorkingDiff(tab) {
+  const repoPath = (state.repoPaths[tab.key] || repoPathEl.value || "").trim();
+  if (!repoPath) {
+    tab.workingData = null;
+    tab.workingLoading = false;
+    tab.workingError = "Set a repo path (the field above the chat) to see the agent's changes.";
+    if (state.active === tab.key && tab.viewMode === "working") renderReview();
+    return;
+  }
+  tab.workingLoading = true;
+  tab.workingError = null;
+  if (state.active === tab.key && tab.viewMode === "working") renderReview();
+  try {
+    const res = await fetch(`/api/working/diff?repoPath=${encodeURIComponent(repoPath)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to load working changes.");
+    tab.workingData = data;
+    tab.workingError = null;
+    // The agent may have re-edited a file we already cached the content of (this
+    // runs after every agent turn). Drop the cache so the full-file/preview view
+    // refetches the latest working-tree bytes instead of showing stale content.
+    tab.fileContents = {};
+  } catch (e) {
+    tab.workingData = null;
+    tab.workingError = e.message;
+  } finally {
+    tab.workingLoading = false;
+    if (state.active === tab.key && tab.viewMode === "working") renderReview();
+  }
+}
+
+// Switch the tab between "review" and "working" diff views. Resets the file
+// selection (the two views have different file sets) and lazily fetches the
+// working diff the first time it's shown.
+function setDiffView(tab, mode) {
+  if ((tab.viewMode || "review") === mode) return;
+  tab.viewMode = mode;
+  // Cached file content is keyed by filename only and the two views resolve the
+  // same filename to different bytes (committed vs working tree), so drop the
+  // cache on every switch to avoid serving the other view's content.
+  tab.fileContents = {};
+  tab.selected = OVERVIEW;
+  tab.selectedSecondary = null;
+  tab.activePane = "primary";
+  if (mode === "working" && !tab.workingData && !tab.workingLoading) {
+    loadWorkingDiff(tab); // shows loading now, re-renders on completion
+  }
+  renderReview();
+}
+
 function renderReview() {
   const tab = state.tabs.find((t) => t.key === state.active);
   if (!tab) return showEmpty();
   emptyEl.hidden = true;
   reviewEl.hidden = false;
 
-  const pr = tab.data;
-  const stateClass = tab.draft ? "draft" : pr.state;
-  const stateLabel = tab.draft ? "draft" : pr.state;
+  const inWorking = tab.viewMode === "working";
+  const data = activeData(tab);
+  // Header fields with safe fallbacks (working data may not be loaded yet).
+  const h = data || {
+    title: "Working changes", state: "open", author: "",
+    headRef: "working tree", baseRef: "HEAD",
+    additions: 0, deletions: 0, changedFiles: 0, files: [],
+  };
+  const stateClass = tab.draft && !inWorking ? "draft" : h.state;
+  const stateLabel = tab.draft && !inWorking ? "draft" : h.state;
 
-  const titleHtml = tab.kind === "branch"
-    ? `<h1 class="pr-title">${esc(pr.title)}</h1>`
-    : `<h1 class="pr-title"><button type="button" class="pr-title-btn" id="prTitleBtn">${esc(pr.title)}<span class="pr-title-caret">▾</span></button></h1>
+  // In working view (or branch tabs) the title is plain text; only a real PR
+  // gets the clickable "Open in GitHub" dropdown.
+  const titleHtml = (inWorking || tab.kind === "branch")
+    ? `<h1 class="pr-title">${esc(h.title)}</h1>`
+    : `<h1 class="pr-title"><button type="button" class="pr-title-btn" id="prTitleBtn">${esc(h.title)}<span class="pr-title-caret">▾</span></button></h1>
         <div class="pr-title-menu" id="prTitleMenu" hidden>
-          <a class="pr-title-menu-item" id="prTitleOpen" href="${pr.url}" target="_blank" rel="noopener">Open in GitHub ↗</a>
-          <button type="button" class="pr-title-menu-item" id="prTitleCopy" data-url="${esc(pr.url)}">Copy URL</button>
+          <a class="pr-title-menu-item" id="prTitleOpen" href="${h.url}" target="_blank" rel="noopener">Open in GitHub ↗</a>
+          <button type="button" class="pr-title-menu-item" id="prTitleCopy" data-url="${esc(h.url)}">Copy URL</button>
         </div>`;
+
+  const toggleHtml = `
+    <div class="diff-view-toggle">
+      <button type="button" class="view-toggle-btn ${inWorking ? "" : "active"}" data-view="review">Review diff</button>
+      <button type="button" class="view-toggle-btn ${inWorking ? "active" : ""}" data-view="working">Agent's changes</button>
+      ${inWorking ? `<button type="button" class="view-refresh-btn" id="workingRefresh" title="Refresh working changes">↻</button>` : ""}
+    </div>`;
 
   reviewEl.innerHTML = `
     <div class="pr-head">
       <div class="pr-title-wrap">
         ${titleHtml}
+        ${toggleHtml}
       </div>
       <div class="pr-meta">
         <span class="badge ${stateClass}">${stateLabel}</span>
-        <span>@${esc(pr.author)}</span>
-        <span class="branch"><b>${esc(pr.headRef || "")}</b> → <b>${esc(pr.baseRef || "")}</b></span>
-        <span class="diffstat"><span class="plus">+${pr.additions ?? 0}</span> <span class="minus">−${pr.deletions ?? 0}</span> · ${pr.changedFiles ?? pr.files.length} files</span>
+        <span>@${esc(h.author)}</span>
+        <span class="branch"><b>${esc(h.headRef || "")}</b> → <b>${esc(h.baseRef || "")}</b></span>
+        <span class="diffstat"><span class="plus">+${h.additions ?? 0}</span> <span class="minus">−${h.deletions ?? 0}</span> · ${h.changedFiles ?? h.files.length} files</span>
       </div>
     </div>
     <div class="review-body">
@@ -1138,11 +1278,29 @@ function renderReview() {
     </div>
   `;
 
-  if (tab.kind !== "branch") wireTitleMenu();
+  // Wire the view toggle.
+  reviewEl.querySelectorAll(".view-toggle-btn").forEach((b) => {
+    b.addEventListener("click", () => setDiffView(tab, b.dataset.view));
+  });
+  const refreshBtn = $("workingRefresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", () => loadWorkingDiff(tab));
 
-  // Which sidebar entry is selected is transient UI state kept on the in-memory
-  // tab so it survives re-renders (e.g. after posting a comment). Default: the
-  // PR description/overview, like GitHub's Conversation tab.
+  if (!inWorking && tab.kind !== "branch") wireTitleMenu();
+
+  // Working view that isn't ready to render a diff yet: show a status message in
+  // the body instead of the sidebar/main split.
+  if (inWorking) {
+    const body = reviewEl.querySelector(".review-body");
+    let msg = null;
+    if (tab.workingError) msg = tab.workingError;
+    else if (tab.workingLoading || !tab.workingData) msg = "Loading working changes…";
+    else if (!tab.workingData.files.length) msg = "No working-tree changes. The agent hasn't edited any files yet.";
+    if (msg) {
+      body.innerHTML = `<div class="working-status">${esc(msg)}</div>`;
+      return;
+    }
+  }
+
   if (!tab.selected) tab.selected = OVERVIEW;
   if (!tab.sidebarView) tab.sidebarView = "files";
   if (tab.activePane !== "secondary") tab.activePane = "primary";
@@ -1315,7 +1473,7 @@ async function runBreakdownForTab(tab) {
 // Left panel: a "Description" entry at the top, then a nested folder tree of
 // the changed files. Selecting an entry swaps what the main pane shows.
 function renderSidebar(tab) {
-  const pr = tab.data;
+  const pr = activeData(tab);
   const el = $("fileSidebar");
   if (!tab.collapsedDirs) tab.collapsedDirs = new Set();
 
@@ -1500,7 +1658,7 @@ function renderMain(tab) {
 
   // Drop a stale secondary selection that no longer maps to a changed file.
   if (tab.selectedSecondary &&
-      !tab.data.files.find((f) => f.filename === tab.selectedSecondary)) {
+      !activeData(tab).files.find((f) => f.filename === tab.selectedSecondary)) {
     tab.selectedSecondary = null;
   }
 
@@ -1514,7 +1672,7 @@ function renderMain(tab) {
   }
 
   // Split mode: two independently-scrolling panes inside #fileMain.
-  const secondaryFile = tab.data.files.find(
+  const secondaryFile = activeData(tab).files.find(
     (f) => f.filename === tab.selectedSecondary
   );
   el.classList.add("split");
@@ -1560,7 +1718,7 @@ function renderPrimaryInto(tab, el) {
     renderOverview(tab, el);
     return;
   }
-  const file = tab.data.files.find((f) => f.filename === tab.selected);
+  const file = activeData(tab).files.find((f) => f.filename === tab.selected);
   if (!file) {
     // Selection no longer resolves (shouldn't happen) — fall back to overview.
     tab.selected = OVERVIEW;
@@ -1581,7 +1739,7 @@ function setActivePane(tab, which, panes) {
 }
 
 function renderOverview(tab, el) {
-  const pr = tab.data;
+  const pr = activeData(tab);
   const body =
     pr.body && pr.body.trim()
       ? `<div class="description-body">${esc(pr.body)}</div>`
@@ -1880,10 +2038,23 @@ function buildPreviewElement(file, tab, content) {
   return root;
 }
 
-// Fetches a file's content at the head SHA for markdown preview. Branch tabs
-// read straight from the local checkout (no GitHub); PR tabs go through GitHub.
+// Fetches a file's content for full-file/markdown preview. The working
+// ("Agent's changes") view reads the on-disk working tree — the agent's
+// uncommitted edits and created files — so it must NOT go through any committed
+// ref (HEAD would show the pre-edit version, or 404 a newly-created file).
+// Branch tabs read from the local checkout at the head SHA; PR tabs go through
+// GitHub.
 function fetchFileContent(tab, filename) {
-  const ref = tab.data.headSha;
+  if (tab.viewMode === "working") {
+    const repoPath = (state.repoPaths[tab.key] || repoPathEl.value || "").trim();
+    const url = `/api/working/file?${new URLSearchParams({ repoPath, path: filename })}`;
+    return fetch(url).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || "Failed to load file");
+      return body.content;
+    });
+  }
+  const ref = activeData(tab).headSha;
   const url = tab.kind === "branch"
     ? `/api/branch/file?${new URLSearchParams({ repoPath: tab.repoPath, ref, path: filename })}`
     : `/api/pr/file?owner=${encodeURIComponent(tab.owner)}&repo=${encodeURIComponent(tab.repo)}&path=${encodeURIComponent(filename)}&ref=${encodeURIComponent(ref)}`;
@@ -2460,6 +2631,9 @@ function buildDiffElement(file, tab) {
 // A small toolbar above the diff summarising resolved/outdated inline threads
 // and a toggle to reveal resolved ones (hidden by default, like GitHub).
 function renderReviewControls(tab) {
+  // Working view doesn't render PR/branch comments, so its resolved/done/outdated
+  // toggles would control nothing — hide the toolbar there.
+  if (tab.viewMode === "working") return "";
   const inline = (tab.comments && tab.comments.inline) || [];
   const resolved = inline.filter((c) => c.resolved).length;
   const outdated = inline.filter((c) => c.outdated).length;
@@ -2503,6 +2677,11 @@ function visibleInline(tab) {
 function inlineCommentsByLine(tab, filename) {
   const right = new Map();
   const left = new Map();
+  // The "Agent's changes" working view has its own feedback mechanism (queued
+  // chips) and a different line-number space than the PR/branch diff. PR review
+  // comments are anchored to the review diff's lines, so drawing them here would
+  // pin them onto unrelated working-tree lines — suppress them entirely.
+  if (tab.viewMode === "working") return { right, left };
   for (const cm of visibleInline(tab)) {
     if (cm.path !== filename) continue;
     const side = cm.line != null ? cm.side : cm.originalSide || cm.side;
@@ -2682,7 +2861,11 @@ function renderDiffRow(row, file, tab) {
     el.dataset.file = file.filename;
     el.dataset.side = target.side;
     el.dataset.line = String(target.line);
-    el.addEventListener("click", () => openInlineComposer(el, file, target, tab));
+    el.addEventListener("click", () =>
+      tab.viewMode === "working"
+        ? openFeedbackComposer(el, file, target, tab)
+        : openInlineComposer(el, file, target, tab)
+    );
   }
   return el;
 }
@@ -2789,6 +2972,38 @@ function openInlineComposer(rowEl, file, target, tab) {
   cancelBtn.addEventListener("click", () => box.remove());
   ta.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") post();
+    if (e.key === "Escape") box.remove();
+  });
+  rowEl.insertAdjacentElement("afterend", box);
+  ta.focus();
+}
+
+// Working-view counterpart to openInlineComposer: instead of posting a comment,
+// it QUEUES a feedback item for the agent (consumed on the next turn). Captures
+// the changed line's code for context.
+function openFeedbackComposer(rowEl, file, target, tab) {
+  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  const code = rowEl.querySelector(".code")?.textContent || "";
+  const box = document.createElement("div");
+  box.className = "inline-composer";
+  box.innerHTML = `
+    <textarea placeholder="Feedback for the agent on ${esc(file.filename)}:${target.line} — Cmd/Ctrl+Enter to queue"></textarea>
+    <button class="btn accent" type="button">Queue</button>
+    <button class="btn ghost" type="button">Cancel</button>
+  `;
+  const ta = box.querySelector("textarea");
+  const [queueBtn, cancelBtn] = box.querySelectorAll("button");
+  const queue = () => {
+    const note = ta.value.trim();
+    if (!note) return;
+    addFeedback(tab.key, { file: file.filename, line: target.line, side: target.side, code, note });
+    box.remove();
+    renderFeedback();
+  };
+  queueBtn.addEventListener("click", queue);
+  cancelBtn.addEventListener("click", () => box.remove());
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") queue();
     if (e.key === "Escape") box.remove();
   });
   rowEl.insertAdjacentElement("afterend", box);
@@ -3188,6 +3403,26 @@ function buildPinnedContext() {
   );
 }
 
+// Build a "Working-tree feedback" preamble from the active tab's queued feedback
+// on the agent's own uncommitted edits. Each item points at a changed line and
+// carries the user's note, quoting the line verbatim. Returns "" when empty. Sent
+// every turn (then cleared in runAgent) so the agent revises against the latest
+// review of its edits.
+function buildWorkingFeedbackContext() {
+  const items = state.active ? feedbackFor(state.active) : [];
+  if (items.length === 0) return "";
+  const blocks = items.map((f) => {
+    const code = f.code ? `\n\`\`\`\n${f.code}\n\`\`\`` : "";
+    return `- ${f.file}:${f.line}${code}\n  Feedback: ${f.note}`;
+  });
+  return (
+    "[Working-tree feedback — the user reviewed your uncommitted edits and left " +
+    "notes on these changed lines. Revise the working tree accordingly.]\n" +
+    blocks.join("\n\n") +
+    "\n\n[End working-tree feedback]\n\n"
+  );
+}
+
 // UI-only "it's your turn" hint shown after an agent turn ends. Not persisted,
 // never part of the transcript. "" clears it.
 function setAgentStatus(text) {
@@ -3238,13 +3473,19 @@ async function runAgent() {
   // Claude Code session that already carries it. Pinned context stays per-turn
   // because the user's pins change message to message.
   const fullPrompt =
-    (resume ? "" : buildPrContext()) + buildPinnedContext() + prompt;
+    (resume ? "" : buildPrContext()) + buildPinnedContext() + buildWorkingFeedbackContext() + prompt;
 
   // Record + echo the user's turn — store what they actually typed, not the
   // pinned-context plumbing that gets prepended for the agent.
   if (convo) {
     convo.turns.push({ role: "user", text: prompt });
     persist();
+  }
+  // Feedback is consumed per turn: it's now baked into fullPrompt, so clear the
+  // queue and its chips. (fullPrompt was assembled above, before this clear.)
+  if (key) {
+    clearFeedback(key);
+    renderFeedback();
   }
   // The user echo is already a stored turn, so paint it directly (only while
   // its tab is on screen) rather than buffering it on liveRun.
@@ -3325,8 +3566,14 @@ async function runAgent() {
       setAgentStatus("awaiting your reply");
       $("agentInput").focus();
     }
-    // a finished agent run may have changed files — nothing to refetch from GitHub,
-    // but remind the user their local checkout moved.
+    // A finished agent run may have edited files in the checkout. Refresh this
+    // tab's working-tree diff so the "Agent's changes" view reflects the new
+    // edits (and is fresh when the user switches to it). Only when a repo path
+    // is set; loadWorkingDiff re-renders only if the working view is on screen.
+    const editedTab = state.tabs.find((t) => t.key === key);
+    if (editedTab && (state.repoPaths[key] || "").trim()) {
+      loadWorkingDiff(editedTab);
+    }
   }
 }
 
