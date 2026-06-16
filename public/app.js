@@ -3142,9 +3142,11 @@ function addressCommentInChat(tab, cm) {
   const where = cm.path
     ? `on \`${cm.path}\`:${cm.line ?? cm.originalLine ?? "?"}`
     : "";
+  // Prefix every line of the body so a multi-line comment stays one blockquote.
+  const quoted = `> @${author}: ${cm.body || ""}`.replace(/\n/g, "\n> ");
   const prompt =
     `Address this review comment${where ? " " + where : ""}:\n\n` +
-    `> @${author}: ${cm.body || ""}\n\n`;
+    `${quoted}\n\n`;
   const input = $("agentInput");
   input.value = prompt;
   input.focus();
