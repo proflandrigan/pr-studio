@@ -171,11 +171,15 @@ export function splitDiffByFile(diffText) {
     // the header line (`a/<old> b/<new>`) for deletions where +++ is /dev/null.
     let filename = null;
     const plusLine = lines.find((l) => l.startsWith("+++ "));
-    if (plusLine && plusLine !== "+++ /dev/null") {
-      filename = plusLine.slice(4).replace(/^b\//, "");
+    if (plusLine && plusLine.trimEnd() !== "+++ /dev/null") {
+      // git/GitHub append a trailing tab after the path on +++/--- lines when the
+      // path contains a space (to disambiguate from the old timestamp suffix of
+      // classic diff headers) — strip it so the filename matches GitHub's clean
+      // `files[].filename` for the Map lookup below.
+      filename = plusLine.slice(4).replace(/\s+$/, "").replace(/^b\//, "");
     } else {
       const m = lines[0].match(/^a\/(.+?) b\/(.+)$/);
-      if (m) filename = m[2];
+      if (m) filename = m[2].replace(/\s+$/, "");
     }
     if (!filename) continue;
     const hunkIndex = lines.findIndex((l) => l.startsWith("@@"));

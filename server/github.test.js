@@ -118,3 +118,20 @@ test("splitDiffByFile skips sections with no hunk and handles empty input", () =
   const renameOnly = "diff --git a/x b/y\nsimilarity index 100%\nrename from x\nrename to y\n";
   assert.equal(splitDiffByFile(renameOnly).size, 0);
 });
+
+test("splitDiffByFile strips the trailing tab git adds for paths with spaces", () => {
+  // git/GitHub append a trailing tab after the path on ---/+++ lines when the
+  // path contains a space; the extracted key must still match the clean filename.
+  const diff = [
+    "diff --git a/My Analysis.ipynb b/My Analysis.ipynb",
+    "index 111..222 100644",
+    "--- a/My Analysis.ipynb\t",
+    "+++ b/My Analysis.ipynb\t",
+    "@@ -1 +1 @@",
+    "-old",
+    "+new",
+  ].join("\n");
+  const m = splitDiffByFile(diff);
+  assert.ok(m.has("My Analysis.ipynb"));
+  assert.equal(m.get("My Analysis.ipynb"), "@@ -1 +1 @@\n-old\n+new");
+});
