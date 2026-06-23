@@ -1146,7 +1146,12 @@ function closeTab(key) {
 function activate(key) {
   state.active = key;
   const tab = state.tabs.find((t) => t.key === key);
-  if (tab) repoPathEl.value = state.repoPaths[key] || repoPathEl.value || "";
+  if (tab) {
+    // A branch review IS its checkout, so tab.repoPath is authoritative and must
+    // populate the field even if the persisted repoPaths map is missing the entry.
+    const tabPath = tab.kind === "branch" ? tab.repoPath : state.repoPaths[key];
+    repoPathEl.value = tabPath || state.repoPaths[key] || repoPathEl.value || "";
+  }
   renderTabs();
   renderReview();
   renderPins();
@@ -1180,7 +1185,7 @@ async function loadWorkingDiff(tab) {
   if (!repoPath) {
     tab.workingData = null;
     tab.workingLoading = false;
-    tab.workingError = "Set a repo path (the field above the chat) to see the agent's changes.";
+    tab.workingError = "Set the local checkout path in the Claude Code toolbar to see the agent's changes.";
     if (state.active === tab.key && tab.viewMode === "working") renderReview();
     return;
   }
@@ -1434,7 +1439,7 @@ async function runBreakdownForTab(tab) {
     return;
   }
   if (!repoPath) {
-    tab.breakdownError = "Set a local repo path (top of the page) so the agent has a checkout to read.";
+    tab.breakdownError = "Set the local checkout path in the Claude Code toolbar so the agent has a checkout to read.";
     renderSidebar(tab);
     return;
   }
@@ -3447,7 +3452,7 @@ async function runChecksFlow() {
   }
   if (!repoPath) {
     consoleEl.classList.remove("collapsed");
-    append("\n⚠ Set a local repo path before running checks.\n", "err");
+    append("\n⚠ Set the local checkout path in the Claude Code toolbar before running checks.\n", "err");
     return;
   }
   if (!command) {
