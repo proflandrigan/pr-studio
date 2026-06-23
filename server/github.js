@@ -142,9 +142,75 @@ export function parsePrRef(input) {
   throw Object.assign(new Error("Could not parse PR. Use a github.com PR URL or owner/repo#number."), { status: 400 });
 }
 
+// Fetches the full PR diff as text (GitHub's diff media type). Returns null on any
+// failure (e.g. 406 for an enormous diff) so callers fall back gracefully.
+async function getPullRequestDiff({ owner, repo, number }) {
+  try {
+    const diff = await gh(`/repos/${owner}/${repo}/pulls/${number}`, {
+      headers: { Accept: "application/vnd.github.diff" },
+    });
+    return typeof diff === "string" ? diff : null;
+  } catch {
+    return null;
+  }
+}
+
+// Splits a full unified diff (GitHub's `.diff` media type, or `git diff` stdout)
+// into a Map of new-file path -> per-file patch string. Each patch begins at the
+// file's first `@@` hunk header (matching the shape GitHub puts in a file's
+// `patch` field), so a backfilled patch is byte-compatible with parsePatch on the
+// frontend. Files with no hunk (pure rename/mode change) are skipped. Pure — unit-tested.
+export function splitDiffByFile(diffText) {
+  const out = new Map();
+  if (!diffText || typeof diffText !== "string") return out;
+  // Split on the per-file header; keep logic identical to parseGitDiff's section split.
+  const sections = diffText.split(/^diff --git /m).filter((s) => s.trim());
+  for (const section of sections) {
+    const lines = section.split("\n");
+    // New path comes from the `+++ b/<path>` line; fall back to the a/ path from
+    // the header line (`a/<old> b/<new>`) for deletions where +++ is /dev/null.
+    let filename = null;
+    const plusLine = lines.find((l) => l.startsWith("+++ "));
+    if (plusLine && plusLine !== "+++ /dev/null") {
+      filename = plusLine.slice(4).replace(/^b\//, "");
+    } else {
+      const m = lines[0].match(/^a\/(.+?) b\/(.+)$/);
+      if (m) filename = m[2];
+    }
+    if (!filename) continue;
+    const hunkIndex = lines.findIndex((l) => l.startsWith("@@"));
+    if (hunkIndex === -1) continue; // no textual hunk (e.g. pure rename) — nothing to backfill
+    const patch = lines.slice(hunkIndex).join("\n").replace(/\n+$/, "");
+    out.set(filename, patch);
+  }
+  return out;
+}
+
 export async function getPullRequest({ owner, repo, number }) {
   const pr = await gh(`/repos/${owner}/${repo}/pulls/${number}`);
   const files = await gh(`/repos/${owner}/${repo}/pulls/${number}/files?per_page=100`);
+  const mappedFiles = (files || []).map((f) => ({
+    filename: f.filename,
+    status: f.status,
+    additions: f.additions,
+    deletions: f.deletions,
+    patch: f.patch || null,
+  }));
+
+  // GitHub omits `patch` for large files (common for notebooks with output).
+  // Recover those from the full PR diff so the frontend can locate commentable
+  // (diff) lines and offer real inline comments. Best-effort: a failed/oversized
+  // diff fetch just leaves the patches null (today's behavior).
+  if (mappedFiles.some((f) => !f.patch)) {
+    const diffText = await getPullRequestDiff({ owner, repo, number });
+    if (diffText) {
+      const byFile = splitDiffByFile(diffText);
+      for (const f of mappedFiles) {
+        if (!f.patch && byFile.has(f.filename)) f.patch = byFile.get(f.filename);
+      }
+    }
+  }
+
   return {
     owner,
     repo,
@@ -161,13 +227,7 @@ export async function getPullRequest({ owner, repo, number }) {
     deletions: pr.deletions,
     changedFiles: pr.changed_files,
     url: pr.html_url,
-    files: (files || []).map((f) => ({
-      filename: f.filename,
-      status: f.status,
-      additions: f.additions,
-      deletions: f.deletions,
-      patch: f.patch || null,
-    })),
+    files: mappedFiles,
   };
 }
 
