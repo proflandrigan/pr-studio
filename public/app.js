@@ -2233,6 +2233,28 @@ function joinSource(src) {
   return src == null ? "" : String(src);
 }
 
+// Cell-anchor marker: a hidden HTML comment appended to a notebook cell comment's
+// body so the frontend can render it inline under its cell (see buildNotebookElement).
+// HTML comments are not rendered by GitHub's markdown, so it's invisible there.
+function cellAnchorMarker(filename, cellIndex) {
+  return `<!-- pr-studio:cell file="${filename}" index="${cellIndex}" -->`;
+}
+
+// Parses a cell anchor out of a comment body. Returns { file, index } or null.
+function parseCellAnchor(body) {
+  if (!body) return null;
+  const m = String(body).match(/<!--\s*pr-studio:cell\s+file="([^"]*)"\s+index="(\d+)"\s*-->/);
+  return m ? { file: m[1], index: Number(m[2]) } : null;
+}
+
+// Removes the cell-anchor marker from a body for display (the marker would
+// otherwise show as literal text once HTML-escaped in our UI).
+function stripCellAnchor(body) {
+  return String(body == null ? "" : body)
+    .replace(/\s*<!--\s*pr-studio:cell\s+file="[^"]*"\s+index="\d+"\s*-->\s*$/, "")
+    .trimEnd();
+}
+
 // Maps each cell in `notebook.cells` to a 1-indexed, inclusive raw-line span
 // in `rawContent`, by scanning for `"cell_type":` occurrences in source order.
 // Returns null if the number of matches doesn't line up with the cell count
@@ -2340,6 +2362,17 @@ function buildNotebookElement(file, tab, content) {
 
   const byLine = inlineCommentsByLine(tab, file.filename);
   const placedRight = new Set();
+  // Conversation comments anchored to a cell (pr-studio:cell marker) render inline
+  // beneath their cell, not in the Conversation list (see renderConversation).
+  const convoByCell = new Map();
+  for (const cm of (tab.comments && tab.comments.conversation) || []) {
+    if (state.hideDone && isDone(tab, "convo", cm.id)) continue;
+    const anc = parseCellAnchor(cm.body);
+    if (anc && anc.file === file.filename) {
+      if (!convoByCell.has(anc.index)) convoByCell.set(anc.index, []);
+      convoByCell.get(anc.index).push(cm);
+    }
+  }
   const cellSpans = mapCellsToRawLines(content, nb);
   const cells = nb.cells || [];
 
@@ -2406,6 +2439,11 @@ function buildNotebookElement(file, tab, content) {
           placedRight.add(ln);
         }
       }
+    }
+
+    const cellConvo = convoByCell.get(i + 1);
+    if (cellConvo) {
+      for (const cm of cellConvo) root.appendChild(renderCellConvoThread(cm, tab));
     }
   }
 
@@ -2791,6 +2829,44 @@ function renderInlineThread(cm, opts = {}) {
   return el;
 }
 
+// Renders a conversation comment that's anchored to a notebook cell (carries a
+// pr-studio:cell marker) as an inline thread beneath that cell. Mirrors
+// renderInlineThread but routes through the conversation done-type and reply path.
+function renderCellConvoThread(cm, tab) {
+  const display = { ...cm, body: stripCellAnchor(cm.body) };
+  const el = document.createElement("div");
+  const classes = ["inline-comment", "cell-comment"];
+  if (tab && isDone(tab, "convo", cm.id)) classes.push("done");
+  el.className = classes.join(" ");
+
+  const isCmDone = tab ? isDone(tab, "convo", cm.id) : false;
+  const doneBtn =
+    `<button type="button" class="cm-action cm-done${isCmDone ? " on" : ""}" data-done>` +
+    `${isCmDone ? "✓ Done" : "Mark done"}</button>`;
+  const replyBtn = `<button type="button" class="cm-action cm-reply" data-reply>Reply</button>`;
+  const agentBtn = `<button type="button" class="cm-action cm-agent" data-agent>Address with agent</button>`;
+  el.innerHTML = `
+    <div class="comment-head">@${esc(display.author)}<span class="cm-actions">${replyBtn}${agentBtn}${doneBtn}</span></div>
+    <div class="comment-body">${esc(display.body)}</div>`;
+
+  if (tab) {
+    el.querySelector("[data-done]").addEventListener("click", (e) => {
+      e.stopPropagation(); // cells are click-to-comment; don't trigger that
+      toggleDone(tab, "convo", cm.id);
+      renderReview();
+    });
+    el.querySelector("[data-reply]").addEventListener("click", (e) => {
+      e.stopPropagation();
+      openConvoReplyComposer(el, tab, display); // stripped clone → clean quote
+    });
+    el.querySelector("[data-agent]").addEventListener("click", (e) => {
+      e.stopPropagation();
+      addressCommentInChat(tab, display);
+    });
+  }
+  return el;
+}
+
 async function handleHunkExpand(file, tab, hunkKey, dir, fileBodyEl, hunkRowEl) {
   const btn = hunkRowEl ? hunkRowEl.querySelector(`[data-dir="${dir}"]`) : null;
   if (btn) { btn.disabled = true; btn.textContent = "…"; }
@@ -3115,10 +3191,11 @@ function openNotebookCellComposer(cellEl, file, tab, cellIndex, cellType) {
   const ta = box.querySelector("textarea");
   const [postBtn, cancelBtn] = box.querySelectorAll("button");
   const prefix = `**\`${file.filename}\` — cell ${cellIndex} (${cellType}):**\n\n`;
+  const marker = cellAnchorMarker(file.filename, cellIndex);
   const post = () => {
     const text = (ta.value || "").trim();
     if (!text) return;
-    postComment(tab, prefix + text, null, box);
+    postComment(tab, `${prefix}${text}\n\n${marker}`, null, box);
   };
   postBtn.addEventListener("click", post);
   cancelBtn.addEventListener("click", () => box.remove());
@@ -3168,6 +3245,9 @@ function renderConversation(tab) {
       (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
     );
     if (state.hideDone) all = all.filter((cm) => !isDone(tab, "convo", cm.id));
+    // Cell-anchored comments (pr-studio:cell marker) render inline under their
+    // notebook cell, not here, so they aren't shown twice.
+    all = all.filter((cm) => !parseCellAnchor(cm.body));
 
     if (!all.length) {
       html += `<div class="notice info">No conversation comments yet.</div>`;
