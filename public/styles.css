@@ -54,6 +54,29 @@ body {
   height: 52px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+  transition: height 0.18s ease, padding 0.18s ease;
+}
+
+.topbar.collapsed {
+  height: 10px;
+  padding: 0;
+  overflow: hidden;
+}
+.topbar.collapsed > *:not(.topbar-toggle) {
+  display: none;
+}
+
+.topbar-toggle {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  line-height: 1;
+}
+.topbar-toggle:hover {
+  color: var(--text);
 }
 
 .brand {
@@ -584,6 +607,7 @@ body {
 .stage {
   overflow-y: auto;
   position: relative;
+  min-height: 0;
 }
 
 .empty {
@@ -650,6 +674,36 @@ body {
   padding: 10px;
   background: var(--panel);
   border-right: 1px solid var(--line);
+  transition: width 0.18s ease;
+}
+
+.file-sidebar.collapsed {
+  width: 34px;
+  overflow: hidden;
+  padding: 8px 4px;
+}
+.file-sidebar.collapsed > *:not(.sidebar-collapse) {
+  display: none;
+}
+
+.sidebar-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  flex: none;
+}
+.sidebar-collapse:hover {
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 .file-main {
@@ -1750,6 +1804,7 @@ body {
   box-shadow: 0 -10px 30px -18px rgba(230, 169, 63, 0.5);
   height: var(--console-height, 232px);
   min-height: 44px;
+  max-height: 70vh;
   transition: height 0.18s ease;
 }
 

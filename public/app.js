@@ -15,6 +15,8 @@ const state = {
   feedback: {}, // key -> [ {id, file, line, side, code, note} ] — transient, NOT persisted (consumed each agent turn)
   conversations: {}, // key -> { sessionId, started, open, turns: [ { role, text } ] }
   consoleHeight: null, // px height of the agent console, persisted from drag-resize
+  topbarCollapsed: false,
+  sidebarCollapsed: false,
   bootId: null, // last-seen server boot id; a change across loads means npm start re-ran
 };
 
@@ -25,7 +27,7 @@ function keyOf(o, r, n) {
 // ---------- Resizable console ----------
 const CONSOLE_MIN_H = 120;
 function consoleMaxH() {
-  return Math.round(window.innerHeight * 0.8);
+  return Math.round(window.innerHeight * 0.7);
 }
 function applyConsoleHeight(h) {
   if (h == null) return;
@@ -143,6 +145,8 @@ function persist() {
     pins: state.pins,
     conversations: state.conversations,
     consoleHeight: state.consoleHeight,
+    topbarCollapsed: state.topbarCollapsed,
+    sidebarCollapsed: state.sidebarCollapsed,
     bootId: state.bootId,
   };
   try {
@@ -226,6 +230,8 @@ async function init() {
     state.done = saved.done || {};
     state.hideDone = Boolean(saved.hideDone);
     state.consoleHeight = saved.consoleHeight || null;
+    state.topbarCollapsed = Boolean(saved.topbarCollapsed);
+    state.sidebarCollapsed = Boolean(saved.sidebarCollapsed);
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
     }
@@ -240,6 +246,12 @@ async function init() {
   }
 
   if (state.consoleHeight) applyConsoleHeight(state.consoleHeight);
+
+  if (state.topbarCollapsed) {
+    document.querySelector(".topbar").classList.add("collapsed");
+    $("topbarToggle").textContent = "▾";
+    $("topbarToggle").title = "Expand title bar";
+  }
 
   wireEvents();
   refreshCheckCmd();
@@ -521,6 +533,15 @@ function wireEvents() {
   $("console").querySelector(".console-head").addEventListener("click", (e) => {
     if (e.target.closest(".console-controls")) return;
     consoleEl.classList.toggle("collapsed");
+  });
+
+  // Collapse / expand the title bar
+  $("topbarToggle").addEventListener("click", () => {
+    state.topbarCollapsed = !state.topbarCollapsed;
+    document.querySelector(".topbar").classList.toggle("collapsed", state.topbarCollapsed);
+    $("topbarToggle").textContent = state.topbarCollapsed ? "▾" : "▴";
+    $("topbarToggle").title = state.topbarCollapsed ? "Expand title bar" : "Collapse title bar";
+    persist();
   });
 
   $("agentStop").addEventListener("click", () => {
@@ -1495,7 +1516,14 @@ function renderSidebar(tab) {
     ${renderReviewControls(tab)}
     <div class="file-tree">${renderTreeNodes(tree, tab, "", 0)}</div>`;
 
+  const collapsedClass = state.sidebarCollapsed ? " collapsed" : "";
+  el.className = `file-sidebar${collapsedClass}`;
+
   el.innerHTML = `
+    <button class="sidebar-collapse" id="sidebarCollapseBtn" type="button"
+            title="${state.sidebarCollapsed ? "Expand file explorer" : "Collapse file explorer"}">
+      ${state.sidebarCollapsed ? "⇥" : "⇤"}
+    </button>
     <div class="sidebar-item overview${tab.selected === OVERVIEW ? " active" : ""}" data-view="${OVERVIEW}">
       <span class="sidebar-icon">📝</span>
       <span class="sidebar-label">Description &amp; conversation</span>
@@ -1506,6 +1534,13 @@ function renderSidebar(tab) {
     </div>
     ${view === "chunks" ? renderChunksView(tab) : filesArea}
   `;
+
+  $("sidebarCollapseBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    renderSidebar(tab);
+    persist();
+  });
 
   el.querySelectorAll("[data-sidebar-view]").forEach((btn) => {
     btn.addEventListener("click", () => {
