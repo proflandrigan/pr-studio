@@ -251,6 +251,7 @@ async function init() {
     document.querySelector(".topbar").classList.add("collapsed");
     $("topbarToggle").textContent = "▾";
     $("topbarToggle").title = "Expand title bar";
+    $("topbarToggle").setAttribute("aria-label", "Expand title bar");
   }
 
   wireEvents();
@@ -540,7 +541,9 @@ function wireEvents() {
     state.topbarCollapsed = !state.topbarCollapsed;
     document.querySelector(".topbar").classList.toggle("collapsed", state.topbarCollapsed);
     $("topbarToggle").textContent = state.topbarCollapsed ? "▾" : "▴";
-    $("topbarToggle").title = state.topbarCollapsed ? "Expand title bar" : "Collapse title bar";
+    const lbl = state.topbarCollapsed ? "Expand title bar" : "Collapse title bar";
+    $("topbarToggle").title = lbl;
+    $("topbarToggle").setAttribute("aria-label", lbl);
     persist();
   });
 
@@ -1521,7 +1524,8 @@ function renderSidebar(tab) {
 
   el.innerHTML = `
     <button class="sidebar-collapse" id="sidebarCollapseBtn" type="button"
-            title="${state.sidebarCollapsed ? "Expand file explorer" : "Collapse file explorer"}">
+            title="${state.sidebarCollapsed ? "Expand file explorer" : "Collapse file explorer"}"
+            aria-label="${state.sidebarCollapsed ? "Expand file explorer" : "Collapse file explorer"}">
       ${state.sidebarCollapsed ? "⇥" : "⇤"}
     </button>
     <div class="sidebar-item overview${tab.selected === OVERVIEW ? " active" : ""}" data-view="${OVERVIEW}">
