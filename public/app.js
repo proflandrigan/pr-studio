@@ -524,7 +524,8 @@ function wireEvents() {
   });
 
   $("agentStop").addEventListener("click", () => {
-    if (agentAbort) agentAbort.abort();
+    const rs = convoRunState[state.active];
+    if (rs?.abort) rs.abort.abort();
   });
 
   $("addrCommentsBtn").addEventListener("click", () => {
@@ -534,7 +535,7 @@ function wireEvents() {
       append("\n⚠ Open a PR tab first — there's no active PR to address comments for.\n", "err");
       return;
     }
-    if (agentActive) return; // a turn is already streaming; don't double-fire
+    if (convoRunState[state.active]?.active) return; // a turn is already streaming; don't double-fire
     $("agentInput").value = buildCommentReviewPrompt(tab.key);
     runAgent();
   });
@@ -1132,6 +1133,7 @@ function closeTab(key) {
     const next = state.tabs[i] || state.tabs[i - 1];
     state.active = next ? next.key : null;
   }
+  delete convoRunState[key];
   renderTabs();
   if (state.active) {
     renderReview();
@@ -3397,23 +3399,20 @@ function buildCommentReviewPrompt(prRef) {
   );
 }
 
-let agentActive = false;
-let agentAbort = null; // AbortController for the in-flight agent turn
-// In-progress run output (agent or checks) for the tab keyed by `key`. The
-// console is one global element shared by every tab, so a run that keeps
-// streaming after the user switches tabs must NOT paint into another tab's
-// view, yet switching back to its own tab should re-show the progress so far.
-// `pieces` holds {text, cls} fragments; renderTranscript replays them for the
-// matching tab. Committed to convo.turns when the run finishes, then cleared.
-let liveRun = null;
+// Per-tab transient run state (never persisted). Keyed by tab key, each entry
+// holds `{ active, abort, liveRun, checksActive }` so agent and checks runs on
+// different PR tabs are fully independent — PR-2 can start a turn while PR-1
+// is still streaming, with no clobbering of output or the Stop button target.
+const convoRunState = {};
 
 // Stream one fragment of a CHECKS run: buffer it (so a tab switch-back can
 // replay it) and paint it into the live <pre> only while this run's tab is on
 // screen. (Agent runs no longer use emit — see handleAgentEvent.)
 function emit(key, text, cls) {
-  if (liveRun && liveRun.key === key) liveRun.pieces.push({ text, cls });
-  if (state.active !== key || !liveRun || !liveRun.el) return;
-  appendTermLine(liveRun.el, text, cls);
+  const rs = convoRunState[key];
+  if (rs && rs.liveRun && rs.liveRun.key === key) rs.liveRun.pieces.push({ text, cls });
+  if (state.active !== key || !rs || !rs.liveRun || !rs.liveRun.el) return;
+  appendTermLine(rs.liveRun.el, text, cls);
 }
 
 // Populate the checks command field for the current repo path: a saved
@@ -3440,11 +3439,11 @@ async function refreshCheckCmd() {
   }
 }
 
-let checksActive = false;
 // Runs the resolved check command, streaming output into the console and
 // finishing with a PASS/FAIL banner.
 async function runChecksFlow() {
-  if (checksActive || agentActive) return;
+  const key = state.active;
+  if (convoRunState[key]?.active || convoRunState[key]?.checksActive) return;
   const repoPath = repoPathEl.value.trim();
   let command = checkCmdEl.value.trim();
   if (!command && state.active && state.checkCmds[repoPath] != null) {
@@ -3465,7 +3464,6 @@ async function runChecksFlow() {
   // Checks share the global console with the per-tab agent chat, so route their
   // output through liveRun/emit too: only paint to the active tab, and commit
   // the result to that tab's transcript so it survives switches and reloads.
-  const key = state.active;
   // Running checks expands the console so its output is visible, but does NOT
   // start an agent session (started stays false, no /api/agent call). If the
   // tab's chat is still closed, open it and sync the chrome before we stream.
@@ -3475,11 +3473,12 @@ async function runChecksFlow() {
     persist();
     renderTranscript(key);
   }
-  liveRun = { key, role: "out", pieces: [], el: null };
-  if (state.active === key) liveRun.el = appendTermBlock();
+  const rs = (convoRunState[key] = convoRunState[key] || {});
+  rs.liveRun = { key, role: "out", pieces: [], el: null };
+  if (state.active === key) rs.liveRun.el = appendTermBlock();
   const header = `\n› checks: ${command}\n`;
   emit(key, header, "sys");
-  checksActive = true;
+  rs.checksActive = true;
   const btn = $("runChecks");
   if (btn) btn.disabled = true;
 
@@ -3504,7 +3503,8 @@ async function runChecksFlow() {
     errMsg = `\n⚠ ${e.message}\n`;
     emit(key, errMsg, "err");
   } finally {
-    checksActive = false;
+    const rs2 = convoRunState[key];
+    if (rs2) rs2.checksActive = false;
     if (btn) btn.disabled = false;
     const m = out.match(/\[exit (\d+)\]/);
     const passed = m && m[1] === "0";
@@ -3519,7 +3519,7 @@ async function runChecksFlow() {
       convo.turns.push({ role: "out", text: footer, cls: passed ? "exit-ok" : "exit-bad" });
       persist();
     }
-    liveRun = null;
+    if (rs2) rs2.liveRun = null;
   }
 }
 
@@ -3622,9 +3622,22 @@ function setAgentBusy(busy) {
   if (input) input.disabled = busy;
   if (indicator) indicator.hidden = !busy;
 }
+// Sync the busy/stop/run button chrome to the currently-active tab's run state.
+// Called on tab switch so switching to a tab with an in-flight run shows the
+// working indicator + Stop button, not the idle "Run" button.
+function syncAgentChrome() {
+  const rs = convoRunState[state.active];
+  const busy = !!(rs && rs.active);
+  setAgentBusy(busy);
+  $("agentRun").disabled = busy;
+  $("agentRun").hidden = busy;
+  $("agentStop").hidden = !busy;
+  if (!busy) setAgentStatus("awaiting your reply");
+}
 
 async function runAgent() {
-  if (agentActive) return;
+  const key = state.active;
+  if (convoRunState[key]?.active || convoRunState[key]?.checksActive) return;
   const input = $("agentInput");
   const prompt = input.value.trim();
   if (!prompt) return;
@@ -3640,7 +3653,6 @@ async function runAgent() {
   // started, otherwise this turn opens a new Claude Code session. `sessionId`
   // is the same UUID for the life of the thread; `resume` flips to true once a
   // turn has completed (the session then exists on disk and can be resumed).
-  const key = state.active;
   const convo = key ? conversationFor(key) : null;
   const sessionId = convo ? convo.sessionId : undefined;
   const resume = convo ? convo.started : false;
@@ -3665,18 +3677,19 @@ async function runAgent() {
   }
   // The user echo is already a stored turn, so paint it directly (only while
   // its tab is on screen) rather than buffering it on liveRun.
-  liveRun = { key, role: "agent", answerText: "", activity: [], resultText: "", bubble: null };
+  const rs = (convoRunState[key] = convoRunState[key] || {});
+  rs.liveRun = { key, role: "agent", answerText: "", activity: [], resultText: "", bubble: null };
   if (state.active === key) {
     appendUserBubble(prompt);
-    liveRun.bubble = appendAgentBubble();
+    rs.liveRun.bubble = appendAgentBubble();
   }
   input.value = "";
   input.style.height = "auto";
-  agentActive = true;
+  rs.active = true;
   $("agentRun").disabled = true;
   setAgentBusy(true);
   setAgentStatus("");
-  agentAbort = new AbortController();
+  rs.abort = new AbortController();
   $("agentRun").hidden = true;
   $("agentStop").hidden = false;
 
@@ -3686,7 +3699,7 @@ async function runAgent() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: fullPrompt, repoPath, sessionId, resume }),
-      signal: agentAbort.signal,
+      signal: rs.abort.signal,
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -3716,26 +3729,29 @@ async function runAgent() {
       handleAgentEvent(key, { type: "notice", level: "error", text: e.message });
     }
   } finally {
-    // Persist the agent's reply as one transcript turn so it survives reloads
-    // and tab switches, then clear the in-progress buffer. Skip an empty reply
-    // (e.g. Stop clicked before any text streamed) so no blank bubble lingers.
-    const answer = liveRun.answerText.trim() ? liveRun.answerText : liveRun.resultText;
-    const hasContent = !!(answer.trim() || liveRun.activity.length);
-    if (convo && hasContent) {
-      convo.turns.push({ role: "agent", text: answer, activity: liveRun.activity.slice() });
-      persist();
+    const rs2 = convoRunState[key];
+    if (rs2) {
+      // Persist the agent's reply as one transcript turn so it survives reloads
+      // and tab switches, then clear the in-progress buffer. Skip an empty reply
+      // (e.g. Stop clicked before any text streamed) so no blank bubble lingers.
+      const lr = rs2.liveRun;
+      if (lr) {
+        const answer = lr.answerText.trim() ? lr.answerText : lr.resultText;
+        const hasContent = !!(answer.trim() || lr.activity.length);
+        if (convo && hasContent) {
+          convo.turns.push({ role: "agent", text: answer, activity: lr.activity.slice() });
+          persist();
+        }
+        if (state.active === key && lr.bubble) {
+          if (hasContent) finalizeAgentTurn(lr, answer);
+          else lr.bubble.closest(".message")?.remove(); // drop the empty bubble
+        }
+      }
+      rs2.liveRun = null;
+      rs2.active = false;
+      rs2.abort = null;
     }
-    if (state.active === key && liveRun.bubble) {
-      if (hasContent) finalizeAgentTurn(liveRun, answer);
-      else liveRun.bubble.closest(".message")?.remove(); // drop the empty bubble
-    }
-    liveRun = null;
-    agentActive = false;
-    $("agentRun").disabled = false;
-    $("agentRun").hidden = false;
-    $("agentStop").hidden = true;
-    agentAbort = null;
-    setAgentBusy(false);
+    syncAgentChrome();
     // Turn finished — make it legible that the ball is in the user's court.
     // Only when this run's tab is on screen (don't hijack focus on a bg tab).
     if (state.active === key) {
@@ -3795,22 +3811,24 @@ function renderTranscript(key) {
     }
   }
   // Replay an in-progress run for this tab and reconnect the live element.
-  if (liveRun && liveRun.key === key) {
-    if (liveRun.role === "agent") {
+  const rs = convoRunState[key];
+  if (rs && rs.liveRun && rs.liveRun.key === key) {
+    if (rs.liveRun.role === "agent") {
       const bubble = appendAgentBubble();
-      liveRun.bubble = bubble;
-      if (liveRun.activity.length) {
-        renderActivityBody(activityBodyFor(bubble), liveRun.activity);
+      rs.liveRun.bubble = bubble;
+      if (rs.liveRun.activity.length) {
+        renderActivityBody(activityBodyFor(bubble), rs.liveRun.activity);
         updateActivitySummary(bubble);
       }
-      bubble.textContent = liveRun.answerText; // raw while still streaming
+      bubble.textContent = rs.liveRun.answerText; // raw while still streaming
     } else {
       const pre = appendTermBlock();
-      liveRun.el = pre;
-      for (const p of liveRun.pieces) appendTermLine(pre, p.text, p.cls);
+      rs.liveRun.el = pre;
+      for (const p of rs.liveRun.pieces) appendTermLine(pre, p.text, p.cls);
     }
   }
   scrollConsole();
+  syncAgentChrome();
 }
 
 // Parse one NDJSON line from /api/agent into a typed event; a non-JSON line is
@@ -3825,28 +3843,30 @@ function parseEventLine(line) {
 // event pushes that prose into the activity log as a reasoning step, records the
 // tool, and clears the bubble — so only post-last-tool prose remains as the answer.
 function handleAgentEvent(key, ev) {
-  if (!liveRun || liveRun.key !== key || liveRun.role !== "agent") return;
-  const live = state.active === key && liveRun.bubble;
+  const rs = convoRunState[key];
+  const lr = rs && rs.liveRun;
+  if (!lr || lr.key !== key || lr.role !== "agent") return;
+  const live = state.active === key && lr.bubble;
   if (ev.type === "text") {
-    liveRun.answerText += ev.text;
-    if (live) { liveRun.bubble.textContent = liveRun.answerText; scrollConsole(); }
+    lr.answerText += ev.text;
+    if (live) { lr.bubble.textContent = lr.answerText; scrollConsole(); }
   } else if (ev.type === "tool") {
-    if (liveRun.answerText.trim()) liveRun.activity.push({ kind: "reasoning", text: liveRun.answerText });
-    liveRun.activity.push({ kind: "tool", text: ev.text });
-    liveRun.answerText = "";
+    if (lr.answerText.trim()) lr.activity.push({ kind: "reasoning", text: lr.answerText });
+    lr.activity.push({ kind: "tool", text: ev.text });
+    lr.answerText = "";
     if (live) {
-      renderActivityBody(activityBodyFor(liveRun.bubble), liveRun.activity);
-      updateActivitySummary(liveRun.bubble);
-      liveRun.bubble.textContent = "";
+      renderActivityBody(activityBodyFor(lr.bubble), lr.activity);
+      updateActivitySummary(lr.bubble);
+      lr.bubble.textContent = "";
       scrollConsole();
     }
   } else if (ev.type === "result") {
-    liveRun.resultText = ev.text || "";
+    lr.resultText = ev.text || "";
   } else if (ev.type === "notice") {
-    liveRun.activity.push({ kind: "notice", text: (ev.level === "error" ? "⚠ " : "") + ev.text });
+    lr.activity.push({ kind: "notice", text: (ev.level === "error" ? "⚠ " : "") + ev.text });
     if (live) {
-      renderActivityBody(activityBodyFor(liveRun.bubble), liveRun.activity);
-      updateActivitySummary(liveRun.bubble);
+      renderActivityBody(activityBodyFor(lr.bubble), lr.activity);
+      updateActivitySummary(lr.bubble);
       scrollConsole();
     }
   }
