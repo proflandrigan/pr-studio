@@ -57,26 +57,33 @@ body {
   transition: height 0.18s ease, padding 0.18s ease;
 }
 
-.topbar.collapsed {
-  height: 10px;
-  padding: 0;
-}
-.topbar.collapsed > *:not(.topbar-toggle) {
-  display: none;
-}
-
-.topbar-toggle {
-  margin-left: 8px;
-  background: transparent;
-  border: none;
+.pr-head-toggle {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
   color: var(--muted);
   cursor: pointer;
-  font-size: 12px;
-  padding: 0;
+  font-size: 13px;
+  padding: 4px 10px;
   line-height: 1;
+  border-radius: 6px;
+  z-index: 10;
+  opacity: 0.7;
+  transition: opacity 0.15s;
 }
-.topbar-toggle:hover {
+.pr-head-toggle:hover {
   color: var(--text);
+  opacity: 1;
+}
+
+.pr-head.collapsed {
+  padding: 2px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.pr-head.collapsed > *:not(.pr-head-toggle) {
+  display: none;
 }
 
 .brand {
@@ -653,6 +660,7 @@ body {
 }
 
 .pr-head {
+  position: relative;
   flex: none;
   padding: 16px 22px;
   border-bottom: 1px solid var(--line);
@@ -1805,7 +1813,7 @@ body {
   height: var(--console-height, 232px);
   min-height: 44px;
   max-height: 70vh;
-  transition: height 0.18s ease;
+  transition: height 0.18s ease, margin-left 0.18s ease, width 0.18s ease;
 }
 
 .console.resizing {
