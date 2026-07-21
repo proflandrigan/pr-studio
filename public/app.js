@@ -36,6 +36,21 @@ function applyConsoleHeight(h) {
   consoleEl.style.setProperty("--console-height", clamped + "px");
 }
 
+// Keep the chat panel's width aligned with the file window (right pane) instead
+// of spanning the full page width under the file sidebar. Uses
+// state.sidebarCollapsed rather than reading the sidebar's offsetWidth because
+// the sidebar's CSS transition can cause DOM reads to return a stale value.
+function updateConsoleOffset() {
+  if (reviewEl.hidden || !$("fileSidebar")) {
+    consoleEl.style.marginLeft = "";
+    consoleEl.style.width = "";
+    return;
+  }
+  const w = state.sidebarCollapsed ? 34 : 300;
+  consoleEl.style.marginLeft = w + "px";
+  consoleEl.style.width = `calc(100% - ${w}px)`;
+}
+
 // ---------- Pinned context ----------
 // Pins live keyed by tab key (owner/repo#number) so they persist across
 // reloads alongside the other keyed maps in state. Each pin records the
@@ -247,16 +262,10 @@ async function init() {
 
   if (state.consoleHeight) applyConsoleHeight(state.consoleHeight);
 
-  if (state.topbarCollapsed) {
-    document.querySelector(".topbar").classList.add("collapsed");
-    $("topbarToggle").textContent = "▾";
-    $("topbarToggle").title = "Expand title bar";
-    $("topbarToggle").setAttribute("aria-label", "Expand title bar");
-  }
-
   wireEvents();
   refreshCheckCmd();
   renderPins();
+  updateConsoleOffset();
 }
 
 function renderStatus(h) {
@@ -536,17 +545,6 @@ function wireEvents() {
     consoleEl.classList.toggle("collapsed");
   });
 
-  // Collapse / expand the title bar
-  $("topbarToggle").addEventListener("click", () => {
-    state.topbarCollapsed = !state.topbarCollapsed;
-    document.querySelector(".topbar").classList.toggle("collapsed", state.topbarCollapsed);
-    $("topbarToggle").textContent = state.topbarCollapsed ? "▾" : "▴";
-    const lbl = state.topbarCollapsed ? "Expand title bar" : "Collapse title bar";
-    $("topbarToggle").title = lbl;
-    $("topbarToggle").setAttribute("aria-label", lbl);
-    persist();
-  });
-
   $("agentStop").addEventListener("click", () => {
     const rs = convoRunState[state.active];
     if (rs?.abort) rs.abort.abort();
@@ -670,6 +668,8 @@ function wireEvents() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("fsModal").hidden) closeFsModal();
   });
+
+  window.addEventListener("resize", updateConsoleOffset);
 }
 
 // ---------- Folder picker modal ----------
@@ -1200,6 +1200,7 @@ function activate(key) {
 function showEmpty() {
   emptyEl.hidden = false;
   reviewEl.hidden = true;
+  updateConsoleOffset();
 }
 
 // ---------- Render review ----------
@@ -1313,7 +1314,8 @@ function renderReview() {
     </div>`;
 
   reviewEl.innerHTML = `
-    <div class="pr-head">
+    <div class="pr-head" id="prHead">
+      <button class="pr-head-toggle" id="prHeadToggle" type="button">▴</button>
       <div class="pr-title-wrap">
         ${titleHtml}
         ${toggleHtml}
@@ -1339,6 +1341,26 @@ function renderReview() {
   if (refreshBtn) refreshBtn.addEventListener("click", () => loadWorkingDiff(tab));
 
   if (!inWorking && tab.kind !== "branch") wireTitleMenu();
+
+  // Wire the PR-head title bar collapse toggle
+  const headToggle = $("prHeadToggle");
+  if (headToggle) {
+    headToggle.addEventListener("click", () => {
+      state.topbarCollapsed = !state.topbarCollapsed;
+      $("prHead").classList.toggle("collapsed", state.topbarCollapsed);
+      headToggle.textContent = state.topbarCollapsed ? "▾" : "▴";
+      const lbl = state.topbarCollapsed ? "Expand title bar" : "Collapse title bar";
+      headToggle.title = lbl;
+      headToggle.setAttribute("aria-label", lbl);
+      persist();
+    });
+    if (state.topbarCollapsed) {
+      $("prHead").classList.add("collapsed");
+      headToggle.textContent = "▾";
+      headToggle.title = "Expand title bar";
+      headToggle.setAttribute("aria-label", "Expand title bar");
+    }
+  }
 
   // Working view that isn't ready to render a diff yet: show a status message in
   // the body instead of the sidebar/main split.
@@ -1374,6 +1396,7 @@ function renderReview() {
 
   renderSidebar(tab);
   renderMain(tab);
+  updateConsoleOffset();
 }
 
 // Wires the clickable PR-title dropdown (Open in GitHub / Copy URL). Called on
@@ -1580,6 +1603,7 @@ function renderSidebar(tab) {
     state.sidebarCollapsed = !state.sidebarCollapsed;
     renderSidebar(tab);
     persist();
+    updateConsoleOffset();
   });
 
   el.querySelectorAll("[data-sidebar-view]").forEach((btn) => {
