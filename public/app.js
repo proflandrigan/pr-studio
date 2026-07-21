@@ -799,8 +799,13 @@ async function openPr(ref, opts = {}) {
   if (existing) {
     // The new tab.data may carry a different headSha; any cached file content
     // (fetched for markdown previews) was fetched against the old SHA and must
-    // be refetched. fileViewModes/collapsedDirs are fine to keep across reloads.
+    // be refetched. Same for the full-file highlight caches (see
+    // ensureResolvedFileContent) — otherwise old-SHA content keeps being reused.
+    // fileViewModes/collapsedDirs are fine to keep across reloads.
     delete existing.fileContents;
+    delete existing.resolvedFileContents;
+    delete existing.baseFileContents;
+    delete existing.resolvedBaseFileContents;
     Object.assign(existing, tab);
   } else {
     state.tabs.push(tab);
@@ -849,8 +854,13 @@ async function openBranchReview(repoPath, base, head, opts = {}) {
     comments: null,
   };
   const existing = state.tabs.find((t) => t.key === key);
-  if (existing) { delete existing.fileContents; Object.assign(existing, tab); }
-  else state.tabs.push(tab);
+  if (existing) {
+    delete existing.fileContents;
+    delete existing.resolvedFileContents;
+    delete existing.baseFileContents;
+    delete existing.resolvedBaseFileContents;
+    Object.assign(existing, tab);
+  } else state.tabs.push(tab);
   // Remember the repo path for this tab so activate()/agent/checks use it.
   state.repoPaths[key] = repoPath;
   renderTabs();
@@ -1205,18 +1215,21 @@ function activeData(tab) {
 }
 
 // Fetch the checkout's working-tree diff for this tab and re-render if it's the
-// active tab. Stores the PR-shaped result on tab.workingData. Sets tab.workingError
-// when there's no repo path or the fetch fails.
+// active tab. Stores the PR-shaped result on tab.workingData. Sets tab.workingNoRepo
+// when there's no repo path configured, or tab.workingError when the fetch fails —
+// kept distinct so renderReview() can tell "needs setup" apart from a real error.
 async function loadWorkingDiff(tab) {
   const repoPath = (state.repoPaths[tab.key] || repoPathEl.value || "").trim();
   if (!repoPath) {
     tab.workingData = null;
     tab.workingLoading = false;
-    tab.workingError = "Set the local checkout path in the Claude Code toolbar to see the agent's changes.";
+    tab.workingNoRepo = true;
+    tab.workingError = null;
     if (state.active === tab.key && tab.viewMode === "working") renderReview();
     return;
   }
   tab.workingLoading = true;
+  tab.workingNoRepo = false;
   tab.workingError = null;
   if (state.active === tab.key && tab.viewMode === "working") renderReview();
   try {
@@ -1228,10 +1241,15 @@ async function loadWorkingDiff(tab) {
     // The agent may have re-edited a file we already cached the content of (this
     // runs after every agent turn). Drop the cache so the full-file/preview view
     // refetches the latest working-tree bytes instead of showing stale content.
+    // Also drop the full-file highlight caches (see ensureResolvedFileContent) —
+    // otherwise stale pre-edit content keeps being reused for syntax highlighting.
     tab.fileContents = {};
+    tab.resolvedFileContents = {};
+    tab.baseFileContents = {};
+    tab.resolvedBaseFileContents = {};
   } catch (e) {
     tab.workingData = null;
-    tab.workingError = e.message;
+    tab.workingError = e.message || "Failed to load working changes.";
   } finally {
     tab.workingLoading = false;
     if (state.active === tab.key && tab.viewMode === "working") renderReview();
@@ -1246,8 +1264,12 @@ function setDiffView(tab, mode) {
   tab.viewMode = mode;
   // Cached file content is keyed by filename only and the two views resolve the
   // same filename to different bytes (committed vs working tree), so drop the
-  // cache on every switch to avoid serving the other view's content.
+  // cache on every switch to avoid serving the other view's content. Same goes
+  // for the full-file highlight caches (see ensureResolvedFileContent).
   tab.fileContents = {};
+  tab.resolvedFileContents = {};
+  tab.baseFileContents = {};
+  tab.resolvedBaseFileContents = {};
   tab.selected = OVERVIEW;
   tab.selectedSecondary = null;
   tab.activePane = "primary";
@@ -1344,12 +1366,26 @@ function renderReview() {
   // the body instead of the sidebar/main split.
   if (inWorking) {
     const body = reviewEl.querySelector(".review-body");
-    let msg = null;
-    if (tab.workingError) msg = tab.workingError;
-    else if (tab.workingLoading || !tab.workingData) msg = "Loading working changes…";
-    else if (!tab.workingData.files.length) msg = "No working-tree changes. The agent hasn't edited any files yet.";
-    if (msg) {
-      body.innerHTML = `<div class="working-status">${esc(msg)}</div>`;
+    let html = null;
+    if (tab.workingNoRepo) {
+      html = `<div class="working-status working-status-block">
+        <div class="working-status-icon">⚑</div>
+        <div class="working-status-title">No checkout configured</div>
+        <div class="working-status-body">Set the local checkout path in the Claude Code toolbar to see the agent's changes.</div>
+      </div>`;
+    } else if (tab.workingError) {
+      html = `<div class="working-status working-status-error">${esc(tab.workingError)}</div>`;
+    } else if (tab.workingLoading || !tab.workingData) {
+      html = `<div class="working-status">Loading working changes…</div>`;
+    } else if (!tab.workingData.files.length) {
+      html = `<div class="working-status working-status-block">
+        <div class="working-status-icon ok">✓</div>
+        <div class="working-status-title">Working tree clean</div>
+        <div class="working-status-body">No uncommitted changes. The agent hasn't edited any files yet.</div>
+      </div>`;
+    }
+    if (html) {
+      body.innerHTML = html;
       return;
     }
   }
@@ -2114,6 +2150,17 @@ function buildPreviewElement(file, tab, content) {
 // ref (HEAD would show the pre-edit version, or 404 a newly-created file).
 // Branch tabs read from the local checkout at the head SHA; PR tabs go through
 // GitHub.
+function fetchFileContentAtRef(tab, filename, ref) {
+  const url = tab.kind === "branch"
+    ? `/api/branch/file?${new URLSearchParams({ repoPath: tab.repoPath, ref, path: filename })}`
+    : `/api/pr/file?owner=${encodeURIComponent(tab.owner)}&repo=${encodeURIComponent(tab.repo)}&path=${encodeURIComponent(filename)}&ref=${encodeURIComponent(ref)}`;
+  return fetch(url).then(async (r) => {
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || "Failed to load file");
+    return body.content;
+  });
+}
+
 function fetchFileContent(tab, filename) {
   if (tab.viewMode === "working") {
     const repoPath = (state.repoPaths[tab.key] || repoPathEl.value || "").trim();
@@ -2124,15 +2171,24 @@ function fetchFileContent(tab, filename) {
       return body.content;
     });
   }
-  const ref = activeData(tab).headSha;
-  const url = tab.kind === "branch"
-    ? `/api/branch/file?${new URLSearchParams({ repoPath: tab.repoPath, ref, path: filename })}`
-    : `/api/pr/file?owner=${encodeURIComponent(tab.owner)}&repo=${encodeURIComponent(tab.repo)}&path=${encodeURIComponent(filename)}&ref=${encodeURIComponent(ref)}`;
-  return fetch(url).then(async (r) => {
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.error || "Failed to load file");
-    return body.content;
-  });
+  return fetchFileContentAtRef(tab, filename, activeData(tab).headSha);
+}
+
+// Old/base side counterpart to fetchFileContent, used to tokenize the full
+// pre-change file once (see ensureResolvedFileContent) instead of just the
+// gapped del/context text visible in the patch. In "working" view the base is
+// the checkout's HEAD (pre-agent-edit) rather than a PR/branch base ref.
+function fetchBaseFileContent(tab, filename) {
+  if (tab.viewMode === "working") {
+    const repoPath = (state.repoPaths[tab.key] || repoPathEl.value || "").trim();
+    const url = `/api/branch/file?${new URLSearchParams({ repoPath, ref: "HEAD", path: filename })}`;
+    return fetch(url).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || "Failed to load file");
+      return body.content;
+    });
+  }
+  return fetchFileContentAtRef(tab, filename, activeData(tab).baseSha);
 }
 
 async function renderFullFileView(file, tab, container) {
@@ -2669,6 +2725,41 @@ function buildExpandedRows(parsedRows, fileLines, expansions) {
   return result;
 }
 
+// Kicks off (once) fetching the full file content at `cacheKey`/`resolvedKey`
+// and, when it resolves, stashes it for synchronous access and repaints the
+// diff if it's still on screen. Shared by the right/head side (fileContents /
+// resolvedFileContents, also used by renderFullFileView + handleHunkExpand)
+// and the left/base side (baseFileContents / resolvedBaseFileContents).
+function ensureResolvedFileContent(tab, filename, cacheKey, resolvedKey, fetcher) {
+  tab[cacheKey] = tab[cacheKey] || {};
+  tab[resolvedKey] = tab[resolvedKey] || {};
+  if (tab[resolvedKey][filename] != null) return;
+  let promise = tab[cacheKey][filename];
+  if (!promise) {
+    promise = fetcher(tab, filename);
+    tab[cacheKey][filename] = promise;
+  }
+  if (promise.__hlHooked) return;
+  promise.__hlHooked = true;
+  promise.then((content) => {
+    tab[resolvedKey][filename] = content;
+    maybeRerenderDiff(tab, filename);
+  }).catch(() => {}); // fall back to gapped highlighting silently
+}
+
+// Repaints the diff for `filename` after full-file content resolves, but only
+// if that file is still what's on screen for the still-active tab in diff view
+// (not preview/full-file mode) — a stale async resolve must not paint over a
+// different tab/file/view the user has since switched to.
+function maybeRerenderDiff(tab, filename) {
+  if (state.active !== tab.key) return;
+  if (!fileIsVisible(tab, filename)) return;
+  const data = activeData(tab);
+  const file = data && data.files.find((f) => f.filename === filename);
+  if (!file || getFileViewMode(tab, file) !== "diff") return;
+  renderMain(tab);
+}
+
 // Builds the rendered diff (rows + any inline comment threads) for one file.
 function buildDiffElement(file, tab) {
   const diff = document.createElement("div");
@@ -2692,23 +2783,39 @@ function buildDiffElement(file, tab) {
   }
   const lang = hlLanguageFor(file.filename);
 
-  // RIGHT (new file) view = context + added lines, in patch order.
-  // LEFT (old file) view  = context + removed lines, in patch order.
-  const rightText = rows.filter(r => r.type === "add" || r.type === "context").map(r => r.text).join("\n");
-  const leftText  = rows.filter(r => r.type === "del" || r.type === "context").map(r => r.text).join("\n");
-  const rightHL = highlightToLines(rightText, lang); // null if lang unknown / hljs missing
-  const leftHL  = highlightToLines(leftText, lang);
+  // Kick off full-file tokenization (right/head + left/base) so hunk-spanning
+  // constructs like triple-quoted docstrings highlight correctly instead of
+  // leaking "in string" state past a hunk gap that elides the closing token.
+  // Re-render is triggered async via maybeRerenderDiff when these resolve.
+  ensureResolvedFileContent(tab, file.filename, "fileContents", "resolvedFileContents", fetchFileContent);
+  ensureResolvedFileContent(tab, file.filename, "baseFileContents", "resolvedBaseFileContents", fetchBaseFileContent);
+
+  const fullRightContent = tab.resolvedFileContents?.[file.filename];
+  const fullLeftContent = tab.resolvedBaseFileContents?.[file.filename];
+  const fullRightHL = fullRightContent != null ? highlightToLines(fullRightContent, lang) : null;
+  const fullLeftHL = fullLeftContent != null ? highlightToLines(fullLeftContent, lang) : null;
+
+  // Fallback while full-file content hasn't resolved yet: highlight just the
+  // gapped hunk-only text (patch order), same as before this fix. This can
+  // mis-tokenize constructs spanning an elided gap between hunks, corrected
+  // moments later once the full-file re-render lands.
+  const fallbackRightHL = fullRightHL
+    ? null
+    : highlightToLines(rows.filter(r => r.type === "add" || r.type === "context").map(r => r.text).join("\n"), lang);
+  const fallbackLeftHL = fullLeftHL
+    ? null
+    : highlightToLines(rows.filter(r => r.type === "del" || r.type === "context").map(r => r.text).join("\n"), lang);
 
   let rIdx = 0, lIdx = 0;
   for (const row of rows) {
     if (row.type === "context") {
-      if (rightHL) row.html = rightHL[rIdx];
+      row.html = fullRightHL ? fullRightHL[row.newLine - 1] : fallbackRightHL?.[rIdx];
       rIdx++; lIdx++;
     } else if (row.type === "add") {
-      if (rightHL) row.html = rightHL[rIdx];
+      row.html = fullRightHL ? fullRightHL[row.newLine - 1] : fallbackRightHL?.[rIdx];
       rIdx++;
     } else if (row.type === "del") {
-      if (leftHL) row.html = leftHL[lIdx];
+      row.html = fullLeftHL ? fullLeftHL[row.oldLine - 1] : fallbackLeftHL?.[lIdx];
       lIdx++;
     }
     // hunk rows: no html

@@ -227,6 +227,7 @@ export async function getPullRequest({ owner, repo, number }) {
     headRef: pr.head ? pr.head.ref : null,
     baseRef: pr.base ? pr.base.ref : null,
     headSha: pr.head ? pr.head.sha : null,
+    baseSha: pr.base ? pr.base.sha : null,
     additions: pr.additions,
     deletions: pr.deletions,
     changedFiles: pr.changed_files,
