@@ -65,6 +65,16 @@ export function tokenSource() {
   return cachedTokenSource ?? null;
 }
 
+export async function getAuthenticatedLogin() {
+  if (!resolveToken()) return null;
+  try {
+    const user = await gh("/user");
+    return user.login || null;
+  } catch {
+    return null;
+  }
+}
+
 function headers() {
   const h = {
     Accept: "application/vnd.github+json",
@@ -452,6 +462,20 @@ export async function setReviewThreadResolved({ threadId, resolved }) {
 export async function replyToReviewComment({ owner, repo, number, commentId, body }) {
   return gh(`/repos/${owner}/${repo}/pulls/${number}/comments/${commentId}/replies`, {
     method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function editConversationComment({ owner, repo, commentId, body }) {
+  return gh(`/repos/${owner}/${repo}/issues/comments/${commentId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function editInlineComment({ owner, repo, commentId, body }) {
+  return gh(`/repos/${owner}/${repo}/pulls/comments/${commentId}`, {
+    method: "PATCH",
     body: JSON.stringify({ body }),
   });
 }

@@ -41,14 +41,9 @@ function applyConsoleHeight(h) {
 // state.sidebarCollapsed rather than reading the sidebar's offsetWidth because
 // the sidebar's CSS transition can cause DOM reads to return a stale value.
 function updateConsoleOffset() {
-  if (reviewEl.hidden || !$("fileSidebar")) {
-    consoleEl.style.marginLeft = "";
-    consoleEl.style.width = "";
-    return;
-  }
-  const w = state.sidebarCollapsed ? 34 : 300;
-  consoleEl.style.marginLeft = w + "px";
-  consoleEl.style.width = `calc(100% - ${w}px)`;
+  const hasReview = !reviewEl.hidden && !!$("fileSidebar");
+  document.body.classList.toggle("has-review", hasReview);
+  document.body.classList.toggle("sidebar-collapsed", !!state.sidebarCollapsed);
 }
 
 // ---------- Pinned context ----------
@@ -162,6 +157,7 @@ function persist() {
     consoleHeight: state.consoleHeight,
     topbarCollapsed: state.topbarCollapsed,
     sidebarCollapsed: state.sidebarCollapsed,
+    wrapLines: state.wrapLines,
     bootId: state.bootId,
   };
   try {
@@ -247,6 +243,8 @@ async function init() {
     state.consoleHeight = saved.consoleHeight || null;
     state.topbarCollapsed = Boolean(saved.topbarCollapsed);
     state.sidebarCollapsed = Boolean(saved.sidebarCollapsed);
+    if (saved.wrapLines != null) state.wrapLines = saved.wrapLines;
+    document.body.classList.toggle("wrap-lines", !!state.wrapLines);
     for (const ref of saved.refs || []) {
       await openPr(`${ref.owner}/${ref.repo}#${ref.number}`, { silent: true });
     }
@@ -1315,7 +1313,7 @@ function renderReview() {
 
   reviewEl.innerHTML = `
     <div class="pr-head" id="prHead">
-      <button class="pr-head-toggle" id="prHeadToggle" type="button">▴</button>
+      <button class="pr-head-toggle" id="prHeadToggle" type="button" title="Collapse title bar" aria-label="Collapse title bar">▴ Hide</button>
       <div class="pr-title-wrap">
         ${titleHtml}
         ${toggleHtml}
@@ -1348,7 +1346,7 @@ function renderReview() {
     headToggle.addEventListener("click", () => {
       state.topbarCollapsed = !state.topbarCollapsed;
       $("prHead").classList.toggle("collapsed", state.topbarCollapsed);
-      headToggle.textContent = state.topbarCollapsed ? "▾" : "▴";
+      headToggle.textContent = state.topbarCollapsed ? "▾ Show" : "▴ Hide";
       const lbl = state.topbarCollapsed ? "Expand title bar" : "Collapse title bar";
       headToggle.title = lbl;
       headToggle.setAttribute("aria-label", lbl);
@@ -1356,10 +1354,24 @@ function renderReview() {
     });
     if (state.topbarCollapsed) {
       $("prHead").classList.add("collapsed");
-      headToggle.textContent = "▾";
+      headToggle.textContent = "▾ Show";
       headToggle.title = "Expand title bar";
       headToggle.setAttribute("aria-label", "Expand title bar");
     }
+  }
+
+  const prHead = $("prHead");
+  if (prHead) {
+    prHead.addEventListener("click", (e) => {
+      if (!state.topbarCollapsed) return;
+      if (e.target.closest("#prHeadToggle")) return;
+      state.topbarCollapsed = false;
+      prHead.classList.remove("collapsed");
+      headToggle.textContent = "▴ Hide";
+      headToggle.title = "Collapse title bar";
+      headToggle.setAttribute("aria-label", "Collapse title bar");
+      persist();
+    });
   }
 
   // Working view that isn't ready to render a diff yet: show a status message in
@@ -1890,6 +1902,10 @@ function renderFileDiff(file, tab) {
         <input type="checkbox" class="view-mode-input" ${mode === "preview" ? "checked" : ""} />
         ${toggleLabel}
       </label>` : ""}
+    <label class="review-toggle wrap-toggle">
+      <input type="checkbox" class="wrap-input" ${state.wrapLines ? "checked" : ""} />
+      Wrap
+    </label>
   `;
   el.appendChild(head);
 
@@ -1928,6 +1944,12 @@ function renderFileDiff(file, tab) {
       renderMain(tab);
     });
   }
+
+  head.querySelector(".wrap-input").addEventListener("change", (e) => {
+    state.wrapLines = e.target.checked;
+    document.body.classList.toggle("wrap-lines", state.wrapLines);
+    persist();
+  });
 
   return el;
 }
@@ -2733,7 +2755,7 @@ function buildExpandedRows(parsedRows, fileLines, expansions) {
 function ensureResolvedFileContent(tab, filename, cacheKey, resolvedKey, fetcher) {
   tab[cacheKey] = tab[cacheKey] || {};
   tab[resolvedKey] = tab[resolvedKey] || {};
-  if (tab[resolvedKey][filename] != null) return;
+  if (filename in tab[resolvedKey]) return;
   let promise = tab[cacheKey][filename];
   if (!promise) {
     promise = fetcher(tab, filename);
@@ -2742,9 +2764,11 @@ function ensureResolvedFileContent(tab, filename, cacheKey, resolvedKey, fetcher
   if (promise.__hlHooked) return;
   promise.__hlHooked = true;
   promise.then((content) => {
-    tab[resolvedKey][filename] = content;
+    tab[resolvedKey][filename] = content ?? false;
     maybeRerenderDiff(tab, filename);
-  }).catch(() => {}); // fall back to gapped highlighting silently
+  }).catch(() => {
+    tab[resolvedKey][filename] = false;
+  });
 }
 
 // Repaints the diff for `filename` after full-file content resolves, but only
@@ -2758,6 +2782,23 @@ function maybeRerenderDiff(tab, filename) {
   const file = data && data.files.find((f) => f.filename === filename);
   if (!file || getFileViewMode(tab, file) !== "diff") return;
   renderMain(tab);
+}
+
+function segmentedFallbackHL(rows, keep, lang) {
+  const out = [];
+  let seg = [];
+  const flush = () => {
+    if (!seg.length) return;
+    const hl = highlightToLines(seg.join("\n"), lang);
+    for (let k = 0; k < seg.length; k++) out.push(hl ? hl[k] : null);
+    seg = [];
+  };
+  for (const r of rows) {
+    if (r.type === "hunk") { flush(); continue; }
+    if (keep(r)) seg.push(r.text);
+  }
+  flush();
+  return out;
 }
 
 // Builds the rendered diff (rows + any inline comment threads) for one file.
@@ -2792,8 +2833,8 @@ function buildDiffElement(file, tab) {
 
   const fullRightContent = tab.resolvedFileContents?.[file.filename];
   const fullLeftContent = tab.resolvedBaseFileContents?.[file.filename];
-  const fullRightHL = fullRightContent != null ? highlightToLines(fullRightContent, lang) : null;
-  const fullLeftHL = fullLeftContent != null ? highlightToLines(fullLeftContent, lang) : null;
+  const fullRightHL = typeof fullRightContent === "string" ? highlightToLines(fullRightContent, lang) : null;
+  const fullLeftHL = typeof fullLeftContent === "string" ? highlightToLines(fullLeftContent, lang) : null;
 
   // Fallback while full-file content hasn't resolved yet: highlight just the
   // gapped hunk-only text (patch order), same as before this fix. This can
@@ -2801,10 +2842,10 @@ function buildDiffElement(file, tab) {
   // moments later once the full-file re-render lands.
   const fallbackRightHL = fullRightHL
     ? null
-    : highlightToLines(rows.filter(r => r.type === "add" || r.type === "context").map(r => r.text).join("\n"), lang);
+    : segmentedFallbackHL(rows, r => r.type === "add" || r.type === "context", lang);
   const fallbackLeftHL = fullLeftHL
     ? null
-    : highlightToLines(rows.filter(r => r.type === "del" || r.type === "context").map(r => r.text).join("\n"), lang);
+    : segmentedFallbackHL(rows, r => r.type === "del" || r.type === "context", lang);
 
   let rIdx = 0, lIdx = 0;
   for (const row of rows) {
@@ -2941,6 +2982,11 @@ function doneCount(tab) {
   return n;
 }
 
+function isOwnComment(tab, cm) {
+  if (tab.kind === "branch") return true;
+  return healthInfo && healthInfo.githubLogin && cm.author === healthInfo.githubLogin;
+}
+
 function renderInlineThread(cm, opts = {}) {
   const tab = opts.tab;
   const el = document.createElement("div");
@@ -2974,10 +3020,14 @@ function renderInlineThread(cm, opts = {}) {
   const replyBtn = canReply
     ? `<button type="button" class="cm-action cm-reply" data-reply>Reply</button>`
     : "";
+  const canEdit = tab && isOwnComment(tab, cm);
+  const editBtn = canEdit
+    ? `<button type="button" class="cm-action cm-edit" data-edit>Edit</button>`
+    : "";
   const agentBtn =
     `<button type="button" class="cm-action cm-agent" data-agent>Address with agent</button>`;
   el.innerHTML = `
-    <div class="comment-head">@${esc(cm.author)}${badges}${where}<span class="cm-actions">${resolveBtn}${replyBtn}${agentBtn}${doneBtn}</span></div>
+    <div class="comment-head">@${esc(cm.author)}${badges}${where}<span class="cm-actions">${resolveBtn}${replyBtn}${editBtn}${agentBtn}${doneBtn}</span></div>
     <div class="comment-body">${esc(cm.body)}</div>`;
 
   if (tab) {
@@ -3002,6 +3052,11 @@ function renderInlineThread(cm, opts = {}) {
       e.stopPropagation();
       addressCommentInChat(tab, cm);
     });
+    const ebtn = el.querySelector("[data-edit]");
+    if (ebtn) ebtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openEditComposer(el, tab, cm, cm.threadId ? "inline" : "conversation");
+    });
   }
   return el;
 }
@@ -3020,10 +3075,14 @@ function renderCellConvoThread(cm, tab) {
   const doneBtn =
     `<button type="button" class="cm-action cm-done${isCmDone ? " on" : ""}" data-done>` +
     `${isCmDone ? "✓ Done" : "Mark done"}</button>`;
+  const canEdit = tab && isOwnComment(tab, display);
+  const editBtn = canEdit
+    ? `<button type="button" class="cm-action cm-edit" data-edit>Edit</button>`
+    : "";
   const replyBtn = `<button type="button" class="cm-action cm-reply" data-reply>Reply</button>`;
   const agentBtn = `<button type="button" class="cm-action cm-agent" data-agent>Address with agent</button>`;
   el.innerHTML = `
-    <div class="comment-head">@${esc(display.author)}<span class="cm-actions">${replyBtn}${agentBtn}${doneBtn}</span></div>
+    <div class="comment-head">@${esc(display.author)}<span class="cm-actions">${editBtn}${replyBtn}${agentBtn}${doneBtn}</span></div>
     <div class="comment-body">${esc(display.body)}</div>`;
 
   if (tab) {
@@ -3039,6 +3098,11 @@ function renderCellConvoThread(cm, tab) {
     el.querySelector("[data-agent]").addEventListener("click", (e) => {
       e.stopPropagation();
       addressCommentInChat(tab, display);
+    });
+    const ebtn = el.querySelector("[data-edit]");
+    if (ebtn) ebtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openEditComposer(el, tab, display, "conversation");
     });
   }
   return el;
@@ -3431,12 +3495,16 @@ function renderConversation(tab) {
     } else {
       for (const cm of all) {
         const d = isDone(tab, "convo", cm.id);
+        const canEdit = isOwnComment(tab, cm);
+        const editBtnHtml = canEdit
+          ? `<button type="button" class="cm-action cm-edit" data-edit-convo="${cm.id}">Edit</button>`
+          : "";
         const replyBtn = `<button type="button" class="cm-action cm-reply" data-reply-convo="${cm.id}">Reply</button>`;
         const agentBtn = `<button type="button" class="cm-action cm-agent" data-agent-convo="${cm.id}">Address with agent</button>`;
         const doneBtn = `<button type="button" class="cm-action cm-done${d ? " on" : ""}" data-done-convo="${cm.id}">${d ? "✓ Done" : "Mark done"}</button>`;
         html += `
           <div class="comment${d ? " done" : ""}">
-            <div class="comment-head">@${esc(cm.author)}<span class="cm-actions">${replyBtn}${agentBtn}${doneBtn}</span></div>
+            <div class="comment-head">@${esc(cm.author)}<span class="cm-actions">${editBtnHtml}${replyBtn}${agentBtn}${doneBtn}</span></div>
             <div class="comment-body">${esc(cm.body)}</div>
           </div>`;
       }
@@ -3469,6 +3537,13 @@ function renderConversation(tab) {
     btn.addEventListener("click", () => {
       const cm = all.find((c) => String(c.id) === btn.dataset.agentConvo);
       if (cm) addressCommentInChat(tab, cm);
+    });
+  });
+
+  el.querySelectorAll("[data-edit-convo]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cm = all.find((c) => String(c.id) === btn.dataset.editConvo);
+      if (cm) openEditComposer(btn.closest(".comment"), tab, cm, "conversation");
     });
   });
 
@@ -3522,6 +3597,70 @@ async function postComment(tab, body, inline, composerEl) {
   } catch (e) {
     flashError("Comment failed: " + e.message);
   }
+}
+
+async function patchComment(tab, commentId, body, kind, composerEl) {
+  body = (body || "").trim();
+  if (!body) return;
+
+  let url, payload;
+  if (tab.kind === "branch") {
+    url = "/api/branch/comment";
+    payload = { repoPath: tab.repoPath, base: tab.base, head: tab.head, commentId, body };
+  } else {
+    url = "/api/pr/comment";
+    payload = { owner: tab.owner, repo: tab.repo, commentId, body, kind };
+  }
+
+  try {
+    const r = await fetch(url, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const res = await r.json();
+    if (!r.ok) throw new Error(res.error || "Failed to edit");
+    if (composerEl) composerEl.remove();
+    loadComments(tab.key);
+  } catch (e) {
+    flashError("Edit failed: " + e.message);
+  }
+}
+
+function openEditComposer(commentEl, tab, cm, kind) {
+  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  const bodyEl = commentEl.querySelector(".comment-body");
+  if (!bodyEl) return;
+  const originalHtml = bodyEl.innerHTML;
+  const box = document.createElement("div");
+  box.className = "inline-composer";
+  box.innerHTML = `
+    <textarea placeholder="Edit comment">${esc(cm.body)}</textarea>
+    <button class="btn accent" type="button">Save</button>
+    <button class="btn ghost" type="button">Cancel</button>
+  `;
+  const ta = box.querySelector("textarea");
+  const [saveBtn, cancelBtn] = box.querySelectorAll("button");
+  let saving = false;
+  const save = async () => {
+    if (saving) return;
+    saving = true;
+    saveBtn.disabled = true;
+    try {
+      await patchComment(tab, cm.id, ta.value, kind, box);
+    } finally {
+      saving = false;
+      saveBtn.disabled = false;
+    }
+  };
+  saveBtn.addEventListener("click", save);
+  cancelBtn.addEventListener("click", () => box.remove());
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") save();
+    if (e.key === "Escape") box.remove();
+  });
+  bodyEl.after(box);
+  ta.focus();
 }
 
 // Toggle a review thread's resolution on GitHub. On a successful *resolve*, also

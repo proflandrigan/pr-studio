@@ -17,6 +17,8 @@
   --del-gutter: rgba(207, 101, 117, 0.22);
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --sidebar-w: 300px;
+  --sidebar-w-collapsed: 34px;
 }
 
 * {
@@ -70,7 +72,7 @@ body {
   line-height: 1;
   border-radius: 6px;
   z-index: 10;
-  opacity: 0.7;
+  opacity: 1;
   transition: opacity 0.15s;
 }
 .pr-head-toggle:hover {
@@ -81,6 +83,7 @@ body {
 .pr-head.collapsed {
   padding: 2px 22px;
   border-bottom: 1px solid var(--line);
+  cursor: pointer;
 }
 .pr-head.collapsed > *:not(.pr-head-toggle) {
   display: none;
@@ -676,7 +679,7 @@ body {
 }
 
 .file-sidebar {
-  width: 300px;
+  width: var(--sidebar-w);
   flex: none;
   overflow-y: auto;
   padding: 10px;
@@ -686,7 +689,7 @@ body {
 }
 
 .file-sidebar.collapsed {
-  width: 34px;
+  width: var(--sidebar-w-collapsed);
   overflow: hidden;
   padding: 8px 4px;
 }
@@ -1537,6 +1540,9 @@ body {
   flex: 1;
 }
 
+body.wrap-lines .diff-row { white-space: pre-wrap; }
+body.wrap-lines .code { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
+
 .diff-row.add {
   background: var(--add-bg);
 }
@@ -1850,7 +1856,11 @@ body {
   min-height: 44px;
   max-height: 70vh;
   transition: height 0.18s ease, margin-left 0.18s ease, width 0.18s ease;
+  margin-left: var(--console-inset, 0);
+  width: calc(100% - var(--console-inset, 0));
 }
+body.has-review { --console-inset: var(--sidebar-w); }
+body.has-review.sidebar-collapsed { --console-inset: var(--sidebar-w-collapsed); }
 
 .console.resizing {
   transition: none;
