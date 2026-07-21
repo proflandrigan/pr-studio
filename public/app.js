@@ -799,8 +799,13 @@ async function openPr(ref, opts = {}) {
   if (existing) {
     // The new tab.data may carry a different headSha; any cached file content
     // (fetched for markdown previews) was fetched against the old SHA and must
-    // be refetched. fileViewModes/collapsedDirs are fine to keep across reloads.
+    // be refetched. Same for the full-file highlight caches (see
+    // ensureResolvedFileContent) — otherwise old-SHA content keeps being reused.
+    // fileViewModes/collapsedDirs are fine to keep across reloads.
     delete existing.fileContents;
+    delete existing.resolvedFileContents;
+    delete existing.baseFileContents;
+    delete existing.resolvedBaseFileContents;
     Object.assign(existing, tab);
   } else {
     state.tabs.push(tab);
@@ -849,8 +854,13 @@ async function openBranchReview(repoPath, base, head, opts = {}) {
     comments: null,
   };
   const existing = state.tabs.find((t) => t.key === key);
-  if (existing) { delete existing.fileContents; Object.assign(existing, tab); }
-  else state.tabs.push(tab);
+  if (existing) {
+    delete existing.fileContents;
+    delete existing.resolvedFileContents;
+    delete existing.baseFileContents;
+    delete existing.resolvedBaseFileContents;
+    Object.assign(existing, tab);
+  } else state.tabs.push(tab);
   // Remember the repo path for this tab so activate()/agent/checks use it.
   state.repoPaths[key] = repoPath;
   renderTabs();
@@ -1230,7 +1240,12 @@ async function loadWorkingDiff(tab) {
     // The agent may have re-edited a file we already cached the content of (this
     // runs after every agent turn). Drop the cache so the full-file/preview view
     // refetches the latest working-tree bytes instead of showing stale content.
+    // Also drop the full-file highlight caches (see ensureResolvedFileContent) —
+    // otherwise stale pre-edit content keeps being reused for syntax highlighting.
     tab.fileContents = {};
+    tab.resolvedFileContents = {};
+    tab.baseFileContents = {};
+    tab.resolvedBaseFileContents = {};
   } catch (e) {
     tab.workingData = null;
     tab.workingError = e.message || "Failed to load working changes.";
@@ -1248,8 +1263,12 @@ function setDiffView(tab, mode) {
   tab.viewMode = mode;
   // Cached file content is keyed by filename only and the two views resolve the
   // same filename to different bytes (committed vs working tree), so drop the
-  // cache on every switch to avoid serving the other view's content.
+  // cache on every switch to avoid serving the other view's content. Same goes
+  // for the full-file highlight caches (see ensureResolvedFileContent).
   tab.fileContents = {};
+  tab.resolvedFileContents = {};
+  tab.baseFileContents = {};
+  tab.resolvedBaseFileContents = {};
   tab.selected = OVERVIEW;
   tab.selectedSecondary = null;
   tab.activePane = "primary";
