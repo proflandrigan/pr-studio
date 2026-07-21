@@ -2817,7 +2817,7 @@ function buildDiffElement(file, tab) {
   let rows = parsePatch(file.patch);
   const resolvedContent = tab.resolvedFileContents?.[file.filename];
   const hunkExps = tab.hunkExpansions?.[file.filename];
-  if (resolvedContent != null && hunkExps && Object.keys(hunkExps).length > 0) {
+  if (typeof resolvedContent === "string" && hunkExps && Object.keys(hunkExps).length > 0) {
     const fileLines = resolvedContent.split("\n");
     if (fileLines.length > 0 && fileLines[fileLines.length - 1] === "") fileLines.pop();
     rows = buildExpandedRows(rows, fileLines, hunkExps);
@@ -3055,7 +3055,13 @@ function renderInlineThread(cm, opts = {}) {
     const ebtn = el.querySelector("[data-edit]");
     if (ebtn) ebtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      openEditComposer(el, tab, cm, cm.threadId ? "inline" : "conversation");
+      // renderInlineThread only ever renders inline comments (see call sites:
+      // byLine.left/right and orphaned-inline lists) — always "inline". Using
+      // cm.threadId here would be wrong: it's best-effort GraphQL enrichment
+      // (see getReviewThreadState in github.js) and can be null for a genuine
+      // inline comment, which would misroute the PATCH to the conversation
+      // endpoint.
+      openEditComposer(el, tab, cm, "inline");
     });
   }
   return el;
@@ -3279,9 +3285,22 @@ function handlePinSelection() {
   pinButtonEl = btn;
 }
 
+// Closes any open composer box (comment/reply/edit) anywhere on the page —
+// there's only ever one at a time. Also restores any comment body an edit
+// composer hid (see openEditComposer): a bare `.inline-composer` removal
+// elsewhere (e.g. opening a reply while an edit is in progress) would
+// otherwise leave that comment's text permanently hidden.
+function closeInlineComposers() {
+  document.querySelectorAll(".comment-body[data-editing]").forEach((b) => {
+    b.style.display = "";
+    b.removeAttribute("data-editing");
+  });
+  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+}
+
 function openInlineComposer(rowEl, file, target, tab) {
   // one composer at a time
-  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  closeInlineComposers();
   const box = document.createElement("div");
   box.className = "inline-composer";
   box.innerHTML = `
@@ -3306,7 +3325,7 @@ function openInlineComposer(rowEl, file, target, tab) {
 // it QUEUES a feedback item for the agent (consumed on the next turn). Captures
 // the changed line's code for context.
 function openFeedbackComposer(rowEl, file, target, tab) {
-  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  closeInlineComposers();
   const code = rowEl.querySelector(".code")?.textContent || "";
   const box = document.createElement("div");
   box.className = "inline-composer";
@@ -3339,7 +3358,7 @@ function openFeedbackComposer(rowEl, file, target, tab) {
 // sends to GitHub's review-comment replies endpoint.
 function openReplyComposer(threadEl, tab, cm) {
   // one composer at a time
-  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  closeInlineComposers();
   const box = document.createElement("div");
   box.className = "inline-composer";
   box.innerHTML = `
@@ -3377,7 +3396,7 @@ function openReplyComposer(threadEl, tab, cm) {
 // comment that quotes the parent. Routes through postComment with inline = null.
 function openConvoReplyComposer(threadEl, tab, cm) {
   // one composer at a time
-  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  closeInlineComposers();
   const box = document.createElement("div");
   box.className = "inline-composer";
   box.innerHTML = `
@@ -3421,7 +3440,7 @@ function openConvoReplyComposer(threadEl, tab, cm) {
 // comments can only target lines that are part of the diff.
 function openNotebookCellComposer(cellEl, file, tab, cellIndex, cellType) {
   // one composer at a time
-  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  closeInlineComposers();
   const box = document.createElement("div");
   box.className = "inline-composer";
   box.innerHTML = `
@@ -3628,10 +3647,19 @@ async function patchComment(tab, commentId, body, kind, composerEl) {
 }
 
 function openEditComposer(commentEl, tab, cm, kind) {
-  document.querySelectorAll(".inline-composer").forEach((n) => n.remove());
+  closeInlineComposers();
   const bodyEl = commentEl.querySelector(".comment-body");
   if (!bodyEl) return;
-  const originalHtml = bodyEl.innerHTML;
+  // Hide the original text while editing so the textarea isn't showing a
+  // duplicate of the comment right above it. Marked with data-editing so
+  // closeInlineComposers() (called when any other composer opens elsewhere)
+  // knows to restore it instead of leaving it stuck hidden.
+  bodyEl.style.display = "none";
+  bodyEl.setAttribute("data-editing", "1");
+  const restore = () => {
+    bodyEl.style.display = "";
+    bodyEl.removeAttribute("data-editing");
+  };
   const box = document.createElement("div");
   box.className = "inline-composer";
   box.innerHTML = `
@@ -3647,17 +3675,21 @@ function openEditComposer(commentEl, tab, cm, kind) {
     saving = true;
     saveBtn.disabled = true;
     try {
+      // On success patchComment removes `box` and reloads comments, which
+      // rebuilds this thread's DOM from scratch — no need to restore bodyEl
+      // there. On failure box stays open, so bodyEl should stay hidden too.
       await patchComment(tab, cm.id, ta.value, kind, box);
     } finally {
       saving = false;
       saveBtn.disabled = false;
     }
   };
+  const cancel = () => { restore(); box.remove(); };
   saveBtn.addEventListener("click", save);
-  cancelBtn.addEventListener("click", () => box.remove());
+  cancelBtn.addEventListener("click", cancel);
   ta.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") save();
-    if (e.key === "Escape") box.remove();
+    if (e.key === "Escape") cancel();
   });
   bodyEl.after(box);
   ta.focus();
