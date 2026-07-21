@@ -1948,6 +1948,7 @@ function renderFileDiff(file, tab) {
   head.querySelector(".wrap-input").addEventListener("change", (e) => {
     state.wrapLines = e.target.checked;
     document.body.classList.toggle("wrap-lines", state.wrapLines);
+    document.querySelectorAll(".wrap-input").forEach((cb) => { cb.checked = state.wrapLines; });
     persist();
   });
 
@@ -3108,7 +3109,7 @@ function renderCellConvoThread(cm, tab) {
     const ebtn = el.querySelector("[data-edit]");
     if (ebtn) ebtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      openEditComposer(el, tab, display, "conversation");
+      openEditComposer(el, tab, cm, "conversation");
     });
   }
   return el;
@@ -3650,20 +3651,21 @@ function openEditComposer(commentEl, tab, cm, kind) {
   closeInlineComposers();
   const bodyEl = commentEl.querySelector(".comment-body");
   if (!bodyEl) return;
-  // Hide the original text while editing so the textarea isn't showing a
-  // duplicate of the comment right above it. Marked with data-editing so
-  // closeInlineComposers() (called when any other composer opens elsewhere)
-  // knows to restore it instead of leaving it stuck hidden.
   bodyEl.style.display = "none";
   bodyEl.setAttribute("data-editing", "1");
   const restore = () => {
     bodyEl.style.display = "";
     bodyEl.removeAttribute("data-editing");
   };
+  const cellAnchor = parseCellAnchor(cm.body);
+  const rawAnchor = cellAnchor
+    ? (cm.body.match(/(<!--\s*pr-studio:cell\s+file="[^"]*"\s+index="\d+"\s*-->)\s*$/) || [])[1] || ""
+    : "";
+  const editBody = rawAnchor ? stripCellAnchor(cm.body) : cm.body;
   const box = document.createElement("div");
   box.className = "inline-composer";
   box.innerHTML = `
-    <textarea placeholder="Edit comment">${esc(cm.body)}</textarea>
+    <textarea placeholder="Edit comment">${esc(editBody)}</textarea>
     <button class="btn accent" type="button">Save</button>
     <button class="btn ghost" type="button">Cancel</button>
   `;
@@ -3675,10 +3677,8 @@ function openEditComposer(commentEl, tab, cm, kind) {
     saving = true;
     saveBtn.disabled = true;
     try {
-      // On success patchComment removes `box` and reloads comments, which
-      // rebuilds this thread's DOM from scratch — no need to restore bodyEl
-      // there. On failure box stays open, so bodyEl should stay hidden too.
-      await patchComment(tab, cm.id, ta.value, kind, box);
+      const body = rawAnchor ? ta.value.trimEnd() + "\n" + rawAnchor : ta.value;
+      await patchComment(tab, cm.id, body, kind, box);
     } finally {
       saving = false;
       saveBtn.disabled = false;
