@@ -12,6 +12,7 @@ import {
   addReply,
   addConversationComment,
   setThreadResolved,
+  editComment,
   toCommentsView,
 } from "./reviewstore.js";
 
@@ -126,6 +127,35 @@ test("setThreadResolved flips resolved; bogus threadId throws 404", () => {
     (err) => {
       assert.strictEqual(err.status, 404);
       assert.match(err.message, /Thread not found/);
+      return true;
+    },
+  );
+});
+
+test("editComment updates inline and conversation bodies; bogus id throws 404", () => {
+  const repoPath = "/tmp/some/repo";
+  const base = "main";
+  const head = "feature-edit";
+
+  const { thread } = addInlineComment({
+    repoPath, base, head, path: "src/e.js", line: 1, body: "old inline",
+  });
+  const convo = addConversationComment({ repoPath, base, head, body: "old convo" });
+
+  const r1 = editComment({ repoPath, base, head, commentId: thread.comments[0].id, body: "new inline" });
+  assert.strictEqual(r1.body, "new inline");
+  const r2 = editComment({ repoPath, base, head, commentId: convo.id, body: "new convo" });
+  assert.strictEqual(r2.body, "new convo");
+
+  const store = readReview(repoPath, base, head);
+  assert.strictEqual(store.threads[0].comments[0].body, "new inline");
+  assert.strictEqual(store.conversation[0].body, "new convo");
+
+  assert.throws(
+    () => editComment({ repoPath, base, head, commentId: "bogus", body: "x" }),
+    (err) => {
+      assert.strictEqual(err.status, 404);
+      assert.match(err.message, /Comment not found/);
       return true;
     },
   );

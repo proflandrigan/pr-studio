@@ -141,6 +141,28 @@ export function setThreadResolved({ repoPath, base, head, threadId, resolved }) 
   return { threadId, resolved };
 }
 
+// Updates the body of an existing comment, whether it lives in an inline
+// thread or the top-level conversation, and persists it. Throws a 404 error
+// if no comment with that id exists.
+export function editComment({ repoPath, base, head, commentId, body }) {
+  const store = readReview(repoPath, base, head);
+  for (const thread of store.threads) {
+    const comment = thread.comments.find((c) => c.id === commentId);
+    if (comment) {
+      comment.body = body;
+      writeReview(repoPath, base, head, store);
+      return { commentId, body };
+    }
+  }
+  const convo = store.conversation.find((c) => c.id === commentId);
+  if (convo) {
+    convo.body = body;
+    writeReview(repoPath, base, head, store);
+    return { commentId, body };
+  }
+  throw Object.assign(new Error("Comment not found"), { status: 404 });
+}
+
 // Pure mapper: store object -> { conversation, inline } in the shape the
 // frontend expects. Each thread's comments are flattened into one inline item
 // per comment, all sharing the thread's id as threadId and the thread's

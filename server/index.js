@@ -26,6 +26,9 @@ import {
   listMyPullRequests,
   hasToken,
   tokenSource,
+  editConversationComment,
+  editInlineComment,
+  getAuthenticatedLogin,
 } from "./github.js";
 import { runAgent, runBreakdown, CLAUDE_BIN } from "./agent.js";
 import { detectCheckCommand, runChecks } from "./checks.js";
@@ -38,6 +41,7 @@ import {
   addConversationComment,
   setThreadResolved,
   toCommentsView,
+  editComment,
 } from "./reviewstore.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -90,9 +94,11 @@ function openBrowser(url) {
   }
 }
 
-app.get("/api/health", (req, res) => {
+app.get("/api/health", async (req, res) => {
+  const login = await getAuthenticatedLogin();
   res.json({
     githubToken: hasToken(),
+    githubLogin: login,
     tokenSource: tokenSource(),
     defaultRepoPath: process.env.DEFAULT_REPO_PATH || null,
     claudeAvailable: checkClaudeAvailable(),
@@ -143,6 +149,21 @@ app.post(
       result = await postConversationComment({ owner, repo, number, body });
     }
     res.json({ ok: true, url: result.html_url });
+  })
+);
+
+app.patch(
+  "/api/pr/comment",
+  wrap(async (req, res) => {
+    const { owner, repo, commentId, body, kind } = req.body;
+    if (!body || !body.trim()) {
+      res.status(400).json({ error: "Comment body is empty." });
+      return;
+    }
+    const result = kind === "inline"
+      ? await editInlineComment({ owner, repo, commentId, body })
+      : await editConversationComment({ owner, repo, commentId, body });
+    res.json({ ok: true, ...result });
   })
 );
 
@@ -275,6 +296,23 @@ app.post(
     } else {
       result = addConversationComment({ repoPath, base, head, body });
     }
+    res.json({ ok: true, ...result });
+  })
+);
+
+app.patch(
+  "/api/branch/comment",
+  wrap(async (req, res) => {
+    const { base, head, commentId, body } = req.body || {};
+    const repoPath = req.body?.repoPath || process.env.DEFAULT_REPO_PATH;
+    if (!repoPath || !base || !head) {
+      throw Object.assign(new Error("repoPath, base, and head are required."), { status: 400 });
+    }
+    if (!body || !body.trim()) {
+      res.status(400).json({ error: "Comment body is empty." });
+      return;
+    }
+    const result = editComment({ repoPath, base, head, commentId, body });
     res.json({ ok: true, ...result });
   })
 );

@@ -65,6 +65,23 @@ export function tokenSource() {
   return cachedTokenSource ?? null;
 }
 
+// Resolve the authenticated user's login once and cache it, mirroring
+// resolveToken(): a network call (GET /user) is too slow to repeat on every
+// /api/health poll. `undefined` means "not yet fetched"; a failed fetch is
+// left uncached so a transient network hiccup doesn't stick forever.
+let cachedLogin;
+export async function getAuthenticatedLogin() {
+  if (!resolveToken()) return null;
+  if (cachedLogin !== undefined) return cachedLogin;
+  try {
+    const user = await gh("/user");
+    cachedLogin = user.login || null;
+    return cachedLogin;
+  } catch {
+    return null;
+  }
+}
+
 function headers() {
   const h = {
     Accept: "application/vnd.github+json",
@@ -452,6 +469,20 @@ export async function setReviewThreadResolved({ threadId, resolved }) {
 export async function replyToReviewComment({ owner, repo, number, commentId, body }) {
   return gh(`/repos/${owner}/${repo}/pulls/${number}/comments/${commentId}/replies`, {
     method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function editConversationComment({ owner, repo, commentId, body }) {
+  return gh(`/repos/${owner}/${repo}/issues/comments/${commentId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function editInlineComment({ owner, repo, commentId, body }) {
+  return gh(`/repos/${owner}/${repo}/pulls/comments/${commentId}`, {
+    method: "PATCH",
     body: JSON.stringify({ body }),
   });
 }
