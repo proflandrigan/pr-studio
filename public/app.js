@@ -36,6 +36,15 @@ function applyConsoleHeight(h) {
   consoleEl.style.setProperty("--console-height", clamped + "px");
 }
 
+// Publish the console's current rendered height as a shared var so the right
+// pane (file/description content) can reserve space below it and stay clear of
+// the floating console. Called automatically on load, resize, and collapse via
+// a ResizeObserver, so it always reflects the real height.
+function syncConsoleDock() {
+  const h = consoleEl.getBoundingClientRect().height;
+  document.documentElement.style.setProperty("--console-dock-height", h + "px");
+}
+
 // Keep the chat panel's width aligned with the file window (right pane) instead
 // of spanning the full page width under the file sidebar. Uses
 // state.sidebarCollapsed rather than reading the sidebar's offsetWidth because
@@ -259,6 +268,12 @@ async function init() {
   }
 
   if (state.consoleHeight) applyConsoleHeight(state.consoleHeight);
+
+  // Keep --console-dock-height in sync with the console's real height (resize,
+  // collapse, and initial load) so the right pane reserves exactly the right
+  // amount of space below the floating console.
+  new ResizeObserver(syncConsoleDock).observe(consoleEl);
+  syncConsoleDock();
 
   wireEvents();
   refreshCheckCmd();
