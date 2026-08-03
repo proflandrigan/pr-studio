@@ -142,11 +142,23 @@ export function getWorkingFile(repoPath, path) {
 export function listBranches(repoPath) {
   assertGitRepo(repoPath);
 
-  const branches = git(repoPath, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+  const locals = git(repoPath, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
     .split("\n")
     .map((b) => b.trim())
     .filter(Boolean)
     .sort();
+
+  // Remote-tracking refs too, so a fresh clone (whose only local head is the
+  // default branch) can still review a branch that was never checked out locally.
+  // Skip origin/HEAD (a symref alias) and any remote whose branch is already
+  // local, to avoid offering the same branch twice.
+  const remotes = git(repoPath, ["for-each-ref", "--format=%(refname:short)", "refs/remotes"])
+    .split("\n")
+    .map((b) => b.trim())
+    .filter((b) => b && !b.endsWith("/HEAD") && !locals.includes(b.replace(/^[^/]+\//, "")))
+    .sort();
+
+  const branches = [...locals, ...remotes];
 
   const current = git(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
 

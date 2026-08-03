@@ -159,6 +159,22 @@ test("listBranches: reports current, branches, and defaultBase", () => {
   assert.strictEqual(result.defaultBase, "main");
 });
 
+test("listBranches: includes remote-tracking branches (fresh clone can still review)", () => {
+  const dir = makeTempRepo();
+  // Point the source repo's HEAD at main so the clone lands on main (the
+  // common fresh-clone case) with feature only as a remote-tracking ref.
+  gitCmd(dir, ["checkout", "main"]);
+  const clone = mkdtempSync(join(tmpdir(), "localreview-clone-"));
+  gitCmd(clone, ["clone", "-q", dir, "repo"]);
+  const cloned = join(clone, "repo");
+  const result = listBranches(cloned);
+  assert.strictEqual(result.current, "main");
+  assert.ok(result.branches.includes("main"));
+  assert.ok(result.branches.includes("origin/feature"), "remote-tracking branch should be listed");
+  // origin/HEAD (the symref alias) must not be offered.
+  assert.ok(!result.branches.some((b) => b.endsWith("/HEAD")), "no origin/HEAD alias");
+});
+
 test("getBranchDiff: returns PR-shaped diff for feature vs main", () => {
   const dir = makeTempRepo();
   const result = getBranchDiff(dir, "main", "feature");
