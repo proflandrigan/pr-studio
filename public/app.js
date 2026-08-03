@@ -1034,6 +1034,12 @@ async function loadBranchesPanel() {
     const repoPath = $("branchRepoPath").value.trim();
     const head = $("branchHead").value, base = $("branchBase").value;
     if (!repoPath || !head || !base) return;
+    if (head === base) {
+      const el = $("branchesState");
+      el.textContent = "Head and base are the same branch — pick two different branches.";
+      el.className = "branches-state error";
+      return;
+    }
     $("branchesPanel").hidden = true;
     window.openBranchReview(repoPath, base, head);
   });
@@ -1059,8 +1065,15 @@ async function fetchBranchesInto(repoPath) {
     if (!res.ok) throw new Error(body.error || "Failed to list branches");
     const opts = (b, sel) =>
       b.map((n) => `<option value="${esc(n)}"${n === sel ? " selected" : ""}>${esc(n)}</option>`).join("");
-    headSel.innerHTML = opts(body.branches, body.current);
-    baseSel.innerHTML = opts(body.branches, body.defaultBase);
+    // `git diff X...X` is empty, which renders as "no diff loaded" with no error.
+    // Prefer the checked-out branch as head, but fall back to any other branch
+    // when it's already the base.
+    const base = body.defaultBase;
+    const head = body.current !== base
+      ? body.current
+      : body.branches.find((b) => b !== base) ?? body.current;
+    headSel.innerHTML = opts(body.branches, head);
+    baseSel.innerHTML = opts(body.branches, base);
     stateEl.textContent = body.branches.length ? "" : "No branches found.";
     reviewBtn.disabled = body.branches.length < 1;
     stateEl.className = "branches-state";
@@ -1400,6 +1413,20 @@ function renderReview() {
       body.innerHTML = html;
       return;
     }
+  }
+
+  // An empty branch diff is a valid result, not a failure — say so explicitly,
+  // otherwise it looks identical to a diff that failed to load.
+  if (tab.kind === "branch" && tab.data && !tab.data.files.length) {
+    reviewEl.querySelector(".review-body").innerHTML = `
+      <div class="working-status working-status-block">
+        <div class="working-status-icon ok">✓</div>
+        <div class="working-status-title">No changes between these branches</div>
+        <div class="working-status-body">
+          <code>${esc(tab.base)}...${esc(tab.head)}</code> has no differences.
+        </div>
+      </div>`;
+    return;
   }
 
   if (!tab.selected) tab.selected = OVERVIEW;
